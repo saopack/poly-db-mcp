@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "WebSearch",
+      "WebFetch(domain:segmentfault.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/client_registry.py'\\).read\\(\\)\\); print\\('client_registry.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/api.py'\\).read\\(\\)\\); print\\('api.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/client_registry.py', encoding='utf-8'\\).read\\(\\)\\); print\\('client_registry.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/api.py', encoding='utf-8'\\).read\\(\\)\\); print\\('api.py: OK'\\)\")",
+      "Bash(timeout 5 python -c \"from src.api import app; print\\('FastAPI app loaded successfully'\\); print\\('Routes:'\\); [print\\(f'  {r.methods} {r.path}'\\) for r in app.routes if hasattr\\(r, 'methods'\\)]\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('main.py: OK'\\)\")",
+      "Bash(python -m src.main --help)",
+      "WebFetch(domain:github.com)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/api.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/docker_manager.py', encoding='utf-8'\\).read\\(\\)\\); print\\('docker_manager.py: OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/config_manager.py', encoding='utf-8'\\).read\\(\\)\\); print\\('config_manager.py: OK'\\)\")",
+      "Bash(python -c \"import yaml; yaml.safe_load\\(open\\('config/databases.yaml', encoding='utf-8'\\)\\); print\\('databases.yaml: OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f'src/{f}', encoding='utf-8'\\).read\\(\\)\\) for f in ['api.py', 'executor.py', 'docker_manager.py', 'config_manager.py', 'client_registry.py']]; print\\('All OK'\\)\")",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pytest tests/test_executor.py -v)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/test_executor.py tests/test_adapters.py tests/test_config_manager.py -v)",
+      "Bash(python -c \"from src.api import app; print\\(f'App title: {app.title}'\\); print\\(f'Routes: {len\\(app.routes\\)}'\\)\")",
+      "Bash(docker rm *)",
+      "Bash(python3 -c ' *)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import oracledb; oracledb.defaults.connect_timeout = 10; conn = oracledb.connect\\(user='system', password='Oracle@123', dsn='172.16.107.133:32769/ORCLPDB'\\); cursor = conn.cursor\\(\\); cursor.execute\\('SELECT 1 FROM DUAL'\\); print\\('OK:', cursor.fetchone\\(\\)\\); cursor.close\\(\\); conn.close\\(\\)\")",
+      "Bash(python -m pip install oracledb)",
+      "Bash(docker volume *)",
+      "Bash(where python *)",
+      "Bash(where pip *)",
+      "Bash(pip --version)",
+      "Bash(\"D:\\\\Program Files\\\\Python\\\\Python311\\\\python.exe\" -m pip install pymysql)",
+      "Bash(python -c \"import oracledb; print\\(oracledb.__version__\\)\")"
+    ]
+  }
+}

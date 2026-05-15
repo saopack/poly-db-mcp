@@ -1,0 +1,16 @@
+docker==7.0.0
+pyyaml==6.0.1
+# Vastbase 专用驱动（源码分发包，安装后提供 psycopg2 模块）
+# 生产环境：pip install vendor/vastbase-psycopg2-1.1.2.tar.gz
+# 开发/测试环境可继续使用 psycopg2-binary（API 兼容）
+psycopg2-binary==2.9.9
+oracledb==2.5.1
+fastapi==0.104.1
+uvicorn==0.24.0.post1
+requests==2.31.0
+python-multipart==0.0.6
+pytest==7.4.3
+# MySQL 驱动
+pymysql==1.1.0
+# SQL Server 驱动
+pymssql==2.2.11

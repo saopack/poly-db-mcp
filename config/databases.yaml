@@ -1,0 +1,198 @@
+databases:
+  vastbase:
+    versions:
+      "3.0.8":
+        image: "vastbase-g100-single-v1.4-3.0.8.29407-linux-x86_64:20260513111853"
+        port: 5432
+        adapter: "VastbaseAdapter"
+        username: "vbmcp"
+        password: "Vastbase@123"
+        database: "postgres"
+        privileged: true
+        env:
+          VB_USERNAME: "vbmcp"
+          VB_PASSWORD: "Vastbase@123"
+          USER_PRIVILEGE: "sysadmin"
+      "3.0.9":
+        image: "vastbase-g100-single-v1.4-3.0.8.29407-linux-x86_64-20260513111853"
+        port: 5432
+        adapter: "VastbaseAdapter"
+        username: "vbmcp"
+        password: "Vastbase@123"
+        database: "postgres"
+        privileged: true
+        env:
+          VB_USERNAME: "vbmcp"
+          VB_PASSWORD: "Vastbase@123"
+          USER_PRIVILEGE: "sysadmin"
+      "2.2.15":
+        image: "vastbase-g100-single-v1.4-3.0.9.31338-linux-x86_64-20260513112809"
+        port: 5432
+        adapter: "VastbaseAdapter"
+        username: "vbadmin"
+        password: "Vastbase@123"
+        database: "postgres"
+        privileged: true
+        env:
+          VB_USERNAME: "dbadmin"
+          VB_PASSWORD: "Vastbase@123"
+
+  kingbase:
+    versions:
+      "V8":
+        image: "kingbase/kdb:V8"
+        port: 54321
+        adapter: "KingbaseAdapter"
+        username: "SYSTEM"
+        password: "password"
+        database: "TEST"
+
+  postgresql:
+    versions:
+      "12":
+        image: "postgres:12"
+        port: 5432
+        adapter: "PostgreSQLAdapter"
+        username: "postgres"
+        password: "postgres"
+        database: "postgres"
+        env:
+          POSTGRES_USER: "postgres"
+          POSTGRES_PASSWORD: "postgres"
+          POSTGRES_DB: "postgres"
+      "13":
+        image: "postgres:13"
+        port: 5432
+        adapter: "PostgreSQLAdapter"
+        username: "postgres"
+        password: "postgres"
+        database: "postgres"
+        env:
+          POSTGRES_USER: "postgres"
+          POSTGRES_PASSWORD: "postgres"
+          POSTGRES_DB: "postgres"
+      "14":
+        image: "postgres:14"
+        port: 5432
+        adapter: "PostgreSQLAdapter"
+        username: "postgres"
+        password: "postgres"
+        database: "postgres"
+        env:
+          POSTGRES_USER: "postgres"
+          POSTGRES_PASSWORD: "postgres"
+          POSTGRES_DB: "postgres"
+
+  oracle:
+    versions:
+      "11c":
+        image: "gvenzl/oracle-xe:11-slim"
+        port: 1521
+        adapter: "OracleAdapter"
+        username: "SYSTEM"
+        password: "oracle"
+        database: "XE"
+        env:
+          ORACLE_PASSWORD: "oracle"
+
+      "12c":
+        image: "gvenzl/oracle-xe:12-slim"
+        port: 1521
+        adapter: "OracleAdapter"
+        username: "SYSTEM"
+        password: "oracle"
+        database: "XE"
+        env:
+          ORACLE_PASSWORD: "oracle"
+
+      "18c":
+        image: "gvenzl/oracle-xe:18-slim"
+        port: 1521
+        adapter: "OracleAdapter"
+        username: "SYSTEM"
+        password: "oracle"
+        database: "XE"
+        env:
+          ORACLE_PASSWORD: "oracle"
+
+      "19c":
+        image: "registry.cn-hangzhou.aliyuncs.com/zhuyijun/oracle:19c"
+        port: 1521
+        adapter: "OracleAdapter"
+        username: "system"
+        password: "Oracle@123"
+        database: "ORCLPDB"
+        env:
+          ORACLE_SID: "ORCLCDB"
+          ORACLE_PDB: "ORCLPDB"
+          ORACLE_PWD: "Oracle@123"
+      "21c":
+        image: "gvenzl/oracle-xe:21-slim"
+        port: 1521
+        adapter: "OracleAdapter"
+        username: "SYSTEM"
+        password: "oracle"
+        database: "XE"
+        env:
+          ORACLE_PASSWORD: "oracle"
+
+
+  mysql:
+    versions:
+      "5.6":
+        image: "mysql:5.6"
+        port: 3306
+        adapter: "MySQLAdapter"
+        username: "root"
+        password: "root123"
+        database: "test"
+        env:
+          MYSQL_ROOT_PASSWORD: "root123"
+          MYSQL_DATABASE: "test"
+          MYSQL_ROOT_HOST: "%"
+      "5.7":
+        image: "mysql:5.7"
+        port: 3306
+        adapter: "MySQLAdapter"
+        username: "root"
+        password: "root123"
+        database: "test"
+        env:
+          MYSQL_ROOT_PASSWORD: "root123"
+          MYSQL_DATABASE: "test"
+          MYSQL_ROOT_HOST: "%"
+      "8.0":
+        image: "mysql:8.0"
+        port: 3306
+        adapter: "MySQLAdapter"
+        username: "root"
+        password: "root123"
+        database: "test"
+        command: "--default-authentication-plugin=mysql_native_password --skip-name-resolve"
+        env:
+          MYSQL_ROOT_PASSWORD: "root123"
+          MYSQL_DATABASE: "test"
+          MYSQL_ROOT_HOST: "%"
+
+  sqlserver:
+    versions:
+      "2017":
+        image: "mcr.microsoft.com/mssql/server:2017-latest"
+        port: 1433
+        adapter: "SqlServerAdapter"
+        username: "sa"
+        password: "Mssql@123"
+        database: "master"
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: "Mssql@123"
+      "2019":
+        image: "mcr.microsoft.com/mssql/server:2019-latest"
+        port: 1433
+        adapter: "SqlServerAdapter"
+        username: "sa"
+        password: "Mssql@123"
+        database: "master"
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: "Mssql@123"
