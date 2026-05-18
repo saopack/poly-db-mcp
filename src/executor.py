@@ -49,6 +49,40 @@ def _normalize_whitespace(query: str) -> str:
     return ''.join(result)
 
 
+def _is_plsql_block(query: str) -> bool:
+    """Check if query is a PL/SQL block that shouldn't be split on semicolons.
+
+    Covers:
+    - Oracle anonymous blocks: DECLARE ... BEGIN ... END; or BEGIN ... END;
+    - CREATE FUNCTION / PROCEDURE / PACKAGE / TYPE / TRIGGER (any DB)
+    - PostgreSQL/Vastbase functions are already protected by dollar-quoting,
+      but this catches edge cases without dollar quotes.
+
+    Excludes:
+    - Bare BEGIN / BEGIN TRANSACTION / BEGIN WORK (PostgreSQL transaction start)
+    """
+    upper = query.strip().upper()
+    if upper.startswith("DECLARE"):
+        return True
+    if upper.startswith("CREATE") and any(
+        kw in upper for kw in (
+            "FUNCTION ", "PROCEDURE ", "PACKAGE ", "TYPE ", "TRIGGER ",
+            "OR REPLACE FUNCTION", "OR REPLACE PROCEDURE",
+            "OR REPLACE PACKAGE", "OR REPLACE TYPE", "OR REPLACE TRIGGER",
+        )
+    ):
+        return True
+    # BEGIN with non-empty body that isn't TRANSACTION/WORK → PL/SQL block
+    if upper.startswith("BEGIN"):
+        after_begin = upper[5:].strip()
+        if not after_begin:
+            return False  # bare "BEGIN" or "BEGIN;"
+        if after_begin.startswith("TRANSACTION") or after_begin.startswith("WORK"):
+            return False
+        return True
+    return False
+
+
 def _split_sql_statements(query: str) -> List[str]:
     """Split SQL string into individual statements.
 
@@ -59,6 +93,9 @@ def _split_sql_statements(query: str) -> List[str]:
     - Backtick-quoted identifiers (MySQL): `...`
     - Single-line comments (--)
     - Block comments (/* */)
+
+    PL/SQL blocks (DECLARE/BEGIN...END, CREATE FUNCTION/PROCEDURE/...)
+    are returned as a single statement — semicolons inside them are preserved.
     """
     statements = []
     current = []
@@ -192,8 +229,23 @@ def _split_sql_statements(query: str) -> List[str]:
                 i += 1
             continue
 
+        # Semicolon: statement separator (standard SQL delimiter)
+        # Inside PL/SQL blocks, keep the semicolon as part of the statement
+        if ch == ';':
+            current_text = ''.join(current)
+            if _is_plsql_block(current_text):
+                current.append(ch)
+                i += 1
+                continue
+            stmt = current_text.strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+
         if ch == '/':
-            # / followed by newline or end-of-input: statement delimiter
+            # / followed by newline or end-of-input: statement delimiter (Oracle)
             if i + 1 < n and query[i + 1] == '\r':
                 stmt = ''.join(current).strip()
                 if stmt:
@@ -240,36 +292,111 @@ class MCPExecutor:
     def _is_ddl_statement(self, query: str) -> bool:
         return bool(self._ddl_pattern.match(query.strip()))
 
+    _REVERSE_DDL_PATTERNS = [
+        # CREATE TABLE [IF NOT EXISTS] [schema.]name → DROP TABLE [schema.]name
+        (
+            re.compile(
+                r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"DROP TABLE {m.group(1)}",
+        ),
+        # CREATE [UNIQUE] INDEX [IF NOT EXISTS] name → DROP INDEX name
+        (
+            re.compile(
+                r'CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"DROP INDEX {m.group(1)}",
+        ),
+        # CREATE [OR REPLACE] VIEW name → DROP VIEW name
+        (
+            re.compile(
+                r'CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(\S+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"DROP VIEW {m.group(1)}",
+        ),
+        # CREATE SEQUENCE [IF NOT EXISTS] name → DROP SEQUENCE name
+        (
+            re.compile(
+                r'CREATE\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"DROP SEQUENCE {m.group(1)}",
+        ),
+        # ALTER TABLE [IF EXISTS] [ONLY] t ADD [COLUMN] name type → ALTER TABLE t DROP COLUMN name
+        (
+            re.compile(
+                r'ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(\S+)\s+ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(\S+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"ALTER TABLE {m.group(1)} DROP COLUMN {m.group(2)}",
+        ),
+        # ALTER TABLE t ADD CONSTRAINT name → ALTER TABLE t DROP CONSTRAINT name
+        (
+            re.compile(
+                r'ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(\S+)\s+ADD\s+CONSTRAINT\s+(\S+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"ALTER TABLE {m.group(1)} DROP CONSTRAINT {m.group(2)}",
+        ),
+        # RENAME TABLE t1 TO t2 → RENAME TABLE t2 TO t1 (MySQL)
+        (
+            re.compile(
+                r'RENAME\s+TABLE\s+(\S+)\s+TO\s+(\S+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"RENAME TABLE {m.group(2)} TO {m.group(1)}",
+        ),
+        # ALTER TABLE t RENAME TO new_t → ALTER TABLE new_t RENAME TO t
+        (
+            re.compile(
+                r'ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(\S+)\s+RENAME\s+TO\s+(\S+)',
+                re.IGNORECASE,
+            ),
+            lambda m: f"ALTER TABLE {m.group(2)} RENAME TO {m.group(1)}",
+        ),
+    ]
+
+    @staticmethod
+    def _generate_reverse_ddl(stmt: str) -> str | None:
+        """Generate a reverse DDL to undo the given DDL statement.
+
+        Returns None for irreversible operations (DROP, TRUNCATE).
+        """
+        for pattern, builder in MCPExecutor._REVERSE_DDL_PATTERNS:
+            m = pattern.search(stmt)
+            if m:
+                return builder(m)
+        return None
+
     def _is_plsql_block(self, stmt: str) -> bool:
-        """Check if a statement is a PL/SQL block that needs its trailing semicolons."""
-        upper = stmt.strip().upper()
-        return (
-            upper.startswith("DECLARE")
-            or upper.startswith("BEGIN")
-            or (upper.startswith("CREATE") and any(
-                kw in upper for kw in (
-                    "FUNCTION ", "PROCEDURE ", "PACKAGE ", "TYPE ", "TRIGGER ",
-                    "OR REPLACE FUNCTION", "OR REPLACE PROCEDURE",
-                    "OR REPLACE PACKAGE", "OR REPLACE TYPE", "OR REPLACE TRIGGER",
-                )
-            ))
-        )
+        """Delegate to module-level _is_plsql_block."""
+        return _is_plsql_block(stmt)
 
     def _sanitize_statement(self, stmt: str) -> str:
-        """Strip trailing semicolons for non-PL/SQL statements.
+        """Strip trailing semicolons and Oracle-style terminator.
 
         DB-API drivers (oracledb, pymysql, psycopg2, etc.) reject trailing `;`
         because it is a client-tool convention (SQL*Plus, mysql CLI), not part
         of the SQL language. PL/SQL blocks preserve their trailing `;` (part of
-        END; syntax).
+        END; syntax) but strip Oracle-style `/` terminator.
         """
         stmt = stmt.strip()
         if self._is_plsql_block(stmt):
+            # Strip Oracle-style trailing terminator: optional whitespace/newlines + /
+            import re
+            stmt = re.sub(r'\s*/\s*$', '', stmt)
             return stmt
         return stmt.rstrip(';')
 
-    def _execute_single(self, adapter, stmt: str) -> Dict[str, Any]:
-        """Execute a single statement (transaction temporarily disabled)."""
+    def _execute_one(self, adapter, stmt: str) -> Dict[str, Any]:
+        """Execute a single statement directly, with timing and logging.
+
+        Unlike _execute_single, this does NOT handle transaction wrapping,
+        rollback, or reverse DDL. The caller is responsible for cleanup.
+        """
         stmt = self._sanitize_statement(stmt)
         stmt_preview = stmt[:200] + '...' if len(stmt) > 200 else stmt
         logger.info(f"Executing SQL: {stmt_preview}")
@@ -277,6 +404,79 @@ class MCPExecutor:
         start_ts = time.time()
         try:
             result = adapter.execute(stmt)
+            end_ts = time.time()
+            elapsed = round((end_ts - start_ts) * 1000, 2)
+            logger.info(f"SQL completed in {elapsed}ms, rows={result.get('row_count', 0)}")
+        except Exception:
+            end_ts = time.time()
+            elapsed = round((end_ts - start_ts) * 1000, 2)
+            logger.error(f"SQL failed after {elapsed}ms: {stmt_preview}")
+            raise
+        end_time = datetime.now(timezone.utc)
+        return {
+            "status": "success",
+            "data": result,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "elapsed_ms": elapsed,
+        }
+
+    def _execute_single(self, adapter, stmt: str) -> Dict[str, Any]:
+        """Execute a single statement.
+
+        Routes to the appropriate execution path:
+        - DDL on databases without DDL transaction support → direct execute (container destroyed)
+        - All other cases → execute within transaction then rollback (container stays clean)
+        """
+        stmt = self._sanitize_statement(stmt)
+        stmt_preview = stmt[:200] + '...' if len(stmt) > 200 else stmt
+        logger.info(f"Executing SQL: {stmt_preview}")
+        start_time = datetime.now(timezone.utc)
+        start_ts = time.time()
+        is_ddl = self._is_ddl_statement(stmt)
+
+        # DDL on databases that don't support transactional DDL: execute directly.
+        # Try reverse DDL to keep the container clean; destroy only as last resort.
+        if is_ddl and not adapter.supports_ddl_transaction:
+            try:
+                result = adapter.execute(stmt)
+            except Exception:
+                end_ts = time.time()
+                elapsed = round((end_ts - start_ts) * 1000, 2)
+                logger.error(f"DDL failed after {elapsed}ms: {stmt_preview}")
+                raise
+            end_ts = time.time()
+            elapsed = round((end_ts - start_ts) * 1000, 2)
+            logger.info(f"DDL (direct) completed in {elapsed}ms")
+            end_time = datetime.now(timezone.utc)
+
+            reverse_stmt = self._generate_reverse_ddl(stmt)
+            if reverse_stmt:
+                try:
+                    logger.info(f"Executing reverse DDL: {reverse_stmt}")
+                    adapter.execute(reverse_stmt)
+                    return {
+                        "status": "success",
+                        "data": result,
+                        "start_time": start_time.isoformat(),
+                        "end_time": end_time.isoformat(),
+                        "elapsed_ms": elapsed,
+                    }
+                except Exception as exc:
+                    logger.warning(f"Reverse DDL failed ({exc}), container will be destroyed")
+
+            return {
+                "status": "success",
+                "data": result,
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "elapsed_ms": elapsed,
+                "note": "DDL executed on database that does not support transactional DDL, container will be destroyed",
+            }
+
+        # All other cases: wrap in transaction + rollback to keep data clean
+        try:
+            result = adapter.execute_with_rollback(stmt)
             end_ts = time.time()
             elapsed = round((end_ts - start_ts) * 1000, 2)
             logger.info(f"SQL completed in {elapsed}ms, rows={result.get('row_count', 0)}")
@@ -370,17 +570,81 @@ class MCPExecutor:
                         destroy_container = True
                     return result
 
-                results = []
-                for stmt in statements:
-                    result = self._execute_single(adapter, stmt)
-                    entry = {"statement": stmt, **result}
-                    results.append(entry)
-                    if result.get("note"):
-                        destroy_container = True
-                    if result.get("status") == "error":
+                if adapter.supports_ddl_transaction:
+                    # Wrap all statements in a single transaction so that later
+                    # statements see the effects of earlier ones (e.g. CREATE
+                    # TABLE then INSERT into it). Rollback at the end.
+                    adapter.begin_transaction()
+                    try:
+                        results = []
+                        for stmt in statements:
+                            try:
+                                entry = {"statement": stmt, **self._execute_one(adapter, stmt)}
+                            except Exception as e:
+                                entry = {"statement": stmt, "status": "error", "message": str(e)}
+                            results.append(entry)
+                            if entry["status"] == "error":
+                                return {"status": "success", "data": results}
                         return {"status": "success", "data": results}
+                    finally:
+                        adapter.rollback()
+                else:
+                    # Non-transactional DDL: DDL auto-commits, DML runs in a
+                    # shared transaction so later statements see earlier DML.
+                    results = []
+                    reverse_ddls = []
+                    in_dml_txn = False
 
-                return {"status": "success", "data": results}
+                    def _flush_dml():
+                        nonlocal in_dml_txn
+                        if in_dml_txn:
+                            adapter.rollback()
+                            in_dml_txn = False
+
+                    try:
+                        for stmt in statements:
+                            if self._is_ddl_statement(stmt):
+                                _flush_dml()
+                                try:
+                                    entry = {"statement": stmt, **self._execute_one(adapter, stmt)}
+                                except Exception as e:
+                                    entry = {"statement": stmt, "status": "error", "message": str(e)}
+                                rev = self._generate_reverse_ddl(stmt)
+                                if rev:
+                                    reverse_ddls.append(rev)
+                                else:
+                                    entry["note"] = (
+                                        "DDL executed on database that does not support "
+                                        "transactional DDL, container will be destroyed"
+                                    )
+                                results.append(entry)
+                                if entry["status"] == "error":
+                                    break
+                            else:
+                                if not in_dml_txn:
+                                    adapter.begin_transaction()
+                                    in_dml_txn = True
+                                try:
+                                    entry = {"statement": stmt, **self._execute_one(adapter, stmt)}
+                                except Exception as e:
+                                    entry = {"statement": stmt, "status": "error", "message": str(e)}
+                                results.append(entry)
+                                if entry["status"] == "error":
+                                    break
+                    finally:
+                        _flush_dml()
+
+                    for rev in reversed(reverse_ddls):
+                        try:
+                            adapter.execute(rev)
+                            logger.info(f"Reverse DDL executed: {rev}")
+                        except Exception as exc:
+                            logger.warning(
+                                f"Reverse DDL failed ({exc}), container will be destroyed"
+                            )
+                            destroy_container = True
+
+                    return {"status": "success", "data": results}
             finally:
                 adapter.disconnect()
 

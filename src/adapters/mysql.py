@@ -81,15 +81,41 @@ class MySQLAdapter(DBAdapter):
         except Exception as e:
             raise AdapterExecutionError(f"MySQL execute failed: {str(e)}")
 
-    # TODO: 暂时禁用事务相关逻辑
     def begin_transaction(self) -> None:
-        pass
+        if self.connection:
+            self.connection.autocommit = False
 
     def rollback(self) -> None:
-        pass
+        if self.connection is None:
+            return
+        if self.cursor:
+            try:
+                self.cursor.close()
+            except Exception:
+                pass
+            self.cursor = None
+        try:
+            self.connection.rollback()
+        except Exception:
+            pass
+        self.connection.autocommit = True
+        self.cursor = self.connection.cursor()
 
     def commit(self) -> None:
-        pass
+        if self.connection is None:
+            return
+        if self.cursor:
+            try:
+                self.cursor.close()
+            except Exception:
+                pass
+            self.cursor = None
+        try:
+            self.connection.commit()
+        except Exception:
+            pass
+        self.connection.autocommit = True
+        self.cursor = self.connection.cursor()
 
     def disconnect(self) -> None:
         logger.info("MySQL disconnecting")

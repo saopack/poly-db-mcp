@@ -80,7 +80,7 @@ class DifyMCPHandler:
                     type="string",
                     required=False,
                     default="A",
-                    description="Vastbase数据库兼容性模式: A=Oracle, B=MySQL, PG=PostgreSQL，默认A"
+                    description="Vastbase数据库兼容性模式: A=Oracle, B=MySQL, PG=PostgreSQL, MSSQL=SQL Server，默认A"
                 )
             ]
         ))

@@ -64,20 +64,13 @@ class DBAdapter(ABC):
         return result
 
     def execute_with_rollback(self, query: str) -> Dict[str, Any]:
+        """Execute query within a transaction and rollback.
+
+        Returns the raw result dict from execute() on success.
+        Exceptions propagate to the caller — rollback is guaranteed via finally.
+        """
+        self.begin_transaction()
         try:
-            self.begin_transaction()
-            result = self.execute(query)
+            return self.execute(query)
+        finally:
             self.rollback()
-            return {"status": "success", "data": result}
-        except AdapterExecutionError as e:
-            try:
-                self.rollback()
-            except Exception:
-                pass
-            return {"status": "error", "message": str(e)}
-        except Exception as e:
-            try:
-                self.rollback()
-            except Exception:
-                pass
-            return {"status": "error", "message": str(e)}

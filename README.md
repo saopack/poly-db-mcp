@@ -125,7 +125,7 @@ POST /api/dify/execute_sql # Dify 专用 SQL 执行接口（需认证）
 
 可选字段：
 
-- `db_compatibility`: Vastbase 兼容性模式（A=Oracle, B=MySQL, PG=PostgreSQL）
+- `db_compatibility`: Vastbase 兼容性模式（A=Oracle, B=MySQL, PG=PostgreSQL, MSSQL=SQL Server）
 - `explain`: 设为 `true` 查看执行计划而非实际执行
 
 响应示例：

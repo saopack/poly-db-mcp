@@ -18,7 +18,7 @@ class ExecuteSqlRequest(BaseModel):
     db_type: str
     version: str
     query: str = Field(..., min_length=1, max_length=5000)
-    db_compatibility: Optional[str] = Field(None, description="Vastbase数据库兼容性模式: A=Oracle, B=MySQL, PG=PostgreSQL")
+    db_compatibility: Optional[str] = Field(None, description="Vastbase数据库兼容性模式: A=Oracle, B=MySQL, PG=PostgreSQL, MSSQL=SQL Server")
     explain: bool = Field(False, description="是否使用EXPLAIN模式查看执行计划而不实际执行")
 
     @field_validator('query')
