@@ -14,7 +14,7 @@ databases:
           VB_PASSWORD: "Vastbase@123"
           USER_PRIVILEGE: "sysadmin"
       "3.0.9":
-        image: "vastbase-g100-single-v1.4-3.0.8.29407-linux-x86_64-20260513111853"
+        image: "vastbase-g100-single-v1.4-3.0.8.29407-linux-x86_64:20260513111853"
         port: 5432
         adapter: "VastbaseAdapter"
         username: "vbmcp"
@@ -26,26 +26,43 @@ databases:
           VB_PASSWORD: "Vastbase@123"
           USER_PRIVILEGE: "sysadmin"
       "2.2.15":
-        image: "vastbase-g100-single-v1.4-3.0.9.31338-linux-x86_64-20260513112809"
+        image: "vastbase-g100-single-v1.4-2.2.15.31056-linux-x86_64:20260518104321"
         port: 5432
         adapter: "VastbaseAdapter"
-        username: "vbadmin"
+        username: "vbmcp"
         password: "Vastbase@123"
         database: "postgres"
         privileged: true
         env:
-          VB_USERNAME: "dbadmin"
+          VB_USERNAME: "vbmcp"
           VB_PASSWORD: "Vastbase@123"
-
+          USER_PRIVILEGE: "sysadmin"
   kingbase:
     versions:
-      "V8":
+      "v8":
         image: "kingbase/kdb:V8"
         port: 54321
         adapter: "KingbaseAdapter"
         username: "SYSTEM"
         password: "password"
         database: "TEST"
+        env:
+          NEED_START: "yes"
+          DB_USER: "SYSTEM"
+          DB_PASSWORD: "password"
+          ENABLE_CI: "yes"
+      "v9":
+        image: "kingbase_v009r001c010b0004_single_x86:v1"
+        port: 54321
+        adapter: "KingbaseAdapter"
+        username: "system"
+        password: "12345678ab"
+        database: "test"
+        env:
+          NEED_START: "yes"
+          DB_USER: "system"
+          DB_PASSWORD: "12345678ab"
+          ENABLE_CI: "yes"
 
   postgresql:
     versions:
@@ -146,6 +163,7 @@ databases:
         username: "root"
         password: "root123"
         database: "test"
+        command: "--default-authentication-plugin=mysql_native_password --skip-name-resolve"
         env:
           MYSQL_ROOT_PASSWORD: "root123"
           MYSQL_DATABASE: "test"
@@ -157,6 +175,7 @@ databases:
         username: "root"
         password: "root123"
         database: "test"
+        command: "--default-authentication-plugin=mysql_native_password --skip-name-resolve"
         env:
           MYSQL_ROOT_PASSWORD: "root123"
           MYSQL_DATABASE: "test"

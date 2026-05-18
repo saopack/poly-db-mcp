@@ -502,6 +502,10 @@ class MCPExecutor:
         db_compatibility: Optional[str] = None,
         explain: bool = False,
     ) -> Dict[str, Any]:
+        # 统一小写，ConfigManager 内部做大小写不敏感匹配
+        db_type = db_type.lower()
+        version = version.lower()
+
         if explain and not query.strip().upper().startswith("EXPLAIN"):
             query = f"EXPLAIN {query}"
 
@@ -514,22 +518,43 @@ class MCPExecutor:
         logger.info(f"run_validation: db_type={db_type}, version={version}, explain={explain}, "
                     f"query_preview={query[:200]}")
 
-        # Vastbase 兼容性模式：运行时参数覆盖配置文件中的默认值
-        if db_compatibility and db_type == 'vastbase':
-            env = config.get('env', {})
-            if env is not None:
-                env = dict(env)
-                env['VB_DBCOMPATIBILITY'] = db_compatibility
-                config = dict(config)
-                config['env'] = env
+        # 兼容性模式：入参自动归一化为目标库所需名称
+        _COMPAT_MAP = {
+            # vastbase codes         vastbase     kingbase
+            'A':                     {'vastbase': 'A',       'kingbase': 'oracle'},
+            'B':                     {'vastbase': 'B',       'kingbase': 'mysql'},
+            'C':                     {'vastbase': 'C',       'kingbase': 'sqlserver'},
+            'PG':                    {'vastbase': 'PG',      'kingbase': 'pg'},
+            'MSSQL':                 {'vastbase': 'MSSQL',   'kingbase': 'sqlserver'},
+            # generic aliases
+            'oracle':                {'vastbase': 'A',       'kingbase': 'oracle'},
+            'mysql':                 {'vastbase': 'B',       'kingbase': 'mysql'},
+            'pg':                    {'vastbase': 'PG',      'kingbase': 'pg'},
+            'sqlserver':             {'vastbase': 'MSSQL',   'kingbase': 'sqlserver'},
+        }
+        _COMPAT_ENV_VAR = {
+            'vastbase': 'VB_DBCOMPATIBILITY',
+            'kingbase': 'DB_MODE',
+        }
+        if db_compatibility and db_type in _COMPAT_ENV_VAR:
+            compat_info = _COMPAT_MAP.get(db_compatibility)
+            if compat_info and db_type in compat_info:
+                compat_value = compat_info[db_type]
+                env = config.get('env', {})
+                if env is not None:
+                    env = dict(env)
+                    env[_COMPAT_ENV_VAR[db_type]] = compat_value
+                    config = dict(config)
+                    config['env'] = env
 
         container_id = None
         destroy_container = False
 
         try:
             container_name = None
-            if db_compatibility and db_type == 'vastbase':
-                container_name = f"db-mcp-{db_type}-{version}-{db_compatibility}"
+            if db_compatibility and db_type in _COMPAT_ENV_VAR:
+                compat_value = _COMPAT_MAP.get(db_compatibility, {}).get(db_type, db_compatibility)
+                container_name = f"db-mcp-{db_type}-{version}-{compat_value}"
             container_id, host_port = self.docker_manager.start_container(db_type, version, config, container_name)
 
             if not self.docker_manager.wait_for_port('localhost', host_port):

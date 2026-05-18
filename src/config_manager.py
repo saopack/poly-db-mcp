@@ -56,18 +56,40 @@ class ConfigManager:
         return cls._validated
 
     @classmethod
+    def _find_db_type(cls, db_type: str) -> Optional[str]:
+        """Case-insensitive db_type lookup, returns the canonical key or None."""
+        if 'databases' not in cls._config:
+            return None
+        lower = db_type.lower()
+        for key in cls._config['databases']:
+            if key.lower() == lower:
+                return key
+        return None
+
+    @classmethod
+    def _find_version(cls, versions: dict, version: str) -> Optional[str]:
+        """Case-insensitive version lookup, returns the canonical key or None."""
+        lower = version.lower()
+        for key in versions:
+            if key.lower() == lower:
+                return key
+        return None
+
+    @classmethod
     def get_db_config(cls, db_type: str, version: str) -> Optional[Dict[str, Any]]:
         if 'databases' not in cls._config:
             return None
-        
-        db_config = cls._config['databases'].get(db_type)
-        if not db_config:
+
+        canonical_type = cls._find_db_type(db_type)
+        if not canonical_type:
             return None
-        
-        version_config = db_config['versions'].get(version)
-        if not version_config:
+        db_config = cls._config['databases'][canonical_type]
+
+        canonical_version = cls._find_version(db_config['versions'], version)
+        if not canonical_version:
             return None
-        
+        version_config = db_config['versions'][canonical_version]
+
         return {
             'image': version_config['image'],
             'port': version_config['port'],
@@ -90,9 +112,12 @@ class ConfigManager:
     def get_db_versions(cls, db_type: str) -> list:
         if 'databases' not in cls._config:
             return []
-        
-        db_config = cls._config['databases'].get(db_type)
-        if not db_config or 'versions' not in db_config:
+
+        canonical_type = cls._find_db_type(db_type)
+        if not canonical_type:
             return []
-        
+        db_config = cls._config['databases'][canonical_type]
+        if 'versions' not in db_config:
+            return []
+
         return list(db_config['versions'].keys())

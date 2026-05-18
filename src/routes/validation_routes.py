@@ -18,7 +18,7 @@ class ExecuteSqlRequest(BaseModel):
     db_type: str
     version: str
     query: str = Field(..., min_length=1, max_length=5000)
-    db_compatibility: Optional[str] = Field(None, description="Vastbase数据库兼容性模式: A=Oracle, B=MySQL, PG=PostgreSQL, MSSQL=SQL Server")
+    db_compatibility: Optional[str] = Field(None, description="数据库兼容性模式，支持通用名(oracle/pg/mysql/sqlserver)或Vastbase编码(A/B/C/PG/MSSQL)，自动转换为目标库格式")
     explain: bool = Field(False, description="是否使用EXPLAIN模式查看执行计划而不实际执行")
 
     @field_validator('query')
@@ -66,9 +66,13 @@ def _audit_log(client_info, db_type: str, version: str, query: str, result_statu
     )
 
 
-@router.get("/api/databases", summary="获取支持的数据库类型列表")
+@router.get("/api/databases", summary="获取支持的数据库类型及版本列表")
 async def get_databases():
-    return {"databases": ConfigManager.get_supported_databases()}
+    databases = []
+    for db_type in ConfigManager.get_supported_databases():
+        versions = ConfigManager.get_db_versions(db_type)
+        databases.append({"type": db_type, "versions": versions})
+    return {"databases": databases}
 
 
 @router.get("/api/databases/{db_type}/versions", summary="获取指定数据库类型支持的版本列表")
@@ -115,11 +119,15 @@ async def shutdown():
 
 @router.get("/api/health", summary="健康检查")
 async def health_check():
-    checks = {"config": "ok", "docker": "ok"}
+    checks = {"config": "ok", "docker": "ok", "databases": []}
     healthy = True
+
+    # config check
     if not ConfigManager.is_config_valid():
         checks["config"] = "invalid"
         healthy = False
+
+    # docker check
     try:
         import docker
         client = docker.from_env()
@@ -127,6 +135,17 @@ async def health_check():
     except Exception:
         checks["docker"] = "unavailable"
         healthy = False
+
+    # per-database container and port status
+    if checks["docker"] == "ok":
+        try:
+            from ..docker_manager import DockerManager
+            dm = DockerManager()
+            db_config = ConfigManager._config.get("databases", {})
+            checks["databases"] = dm.get_containers_status(db_config)
+        except Exception:
+            pass
+
     return {"status": "healthy" if healthy else "degraded", "checks": checks}
 
 

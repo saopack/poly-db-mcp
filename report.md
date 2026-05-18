@@ -141,6 +141,5 @@ DB-MCP 定位为智能答疑平台的数据库 SQL 验证中间层：
 | 1 | 客户端持久化 (SQLite) | 2d | ClientRegistry 目前全部内存存储，重启丢失。新增 SQLite 存储层 |
 | 2 | API Key 哈希存储 | 1d | 注册时 bcrypt 哈希入库，只返回一次明文 |
 | 3 | 速率限制 | 2d | 基于 client_id 的内存令牌桶，可配置 QPS |
-| 4 | SQL 危险操作拦截 | 2d | 可配置黑名单正则，拦截 DROP DATABASE、无 WHERE 的 DELETE 等 |
-| 5 | 健康检查增强 | 1d | 增加各 db_type 已运行容器的连通性探测 |
-| 6 | 统一查询超时 | 2d | executor 层 asyncio.timeout 兜底 + 各适配器实现超时设置 |
+| 4 | 健康检查增强 | 1d | 增加各 db_type 已运行容器的连通性探测 |
+| 5 | 统一查询超时 | 2d | executor 层 asyncio.timeout 兜底 + 各适配器实现超时设置 |

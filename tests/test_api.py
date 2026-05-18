@@ -15,14 +15,25 @@ class TestAPI:
     def test_health_check(self):
         response = client.get("/api/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "healthy"}
+        data = response.json()
+        assert data["status"] in ("healthy", "degraded")
+        assert "checks" in data
+        assert "config" in data["checks"]
+        assert "docker" in data["checks"]
+        assert "databases" in data["checks"]
 
     def test_get_databases(self):
         response = client.get("/api/databases")
         assert response.status_code == 200
         data = response.json()
         assert 'databases' in data
-        assert 'postgresql' in data['databases']
+        db_types = [d['type'] for d in data['databases']]
+        assert 'postgresql' in db_types
+        # each entry has type and versions
+        for entry in data['databases']:
+            assert 'type' in entry
+            assert 'versions' in entry
+            assert isinstance(entry['versions'], list)
 
     def test_get_db_versions(self):
         response = client.get("/api/databases/postgresql/versions")
@@ -59,7 +70,7 @@ class TestAPI:
         })
         assert response.status_code == 422
 
-    @patch('src.api.MCPExecutor')
+    @patch('src.routes.validation_routes.MCPExecutor')
     def test_validate_sql_success(self, MockExecutor):
         mock_executor = MockExecutor.return_value
         mock_executor.run_validation.return_value = {

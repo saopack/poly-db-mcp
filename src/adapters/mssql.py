@@ -19,6 +19,7 @@ class SqlServerAdapter(DBAdapter):
             raise AdapterConnectionError("pymssql library is not installed")
 
         db_port = port if port else self.config.get('port', 1433)
+        timeout = self._statement_timeout if self._statement_timeout > 0 else 30
         try:
             self.connection = pymssql.connect(
                 server=host,
@@ -26,7 +27,9 @@ class SqlServerAdapter(DBAdapter):
                 user=self.config.get('username', 'sa'),
                 password=self.config.get('password', ''),
                 database=self.config.get('database', 'master'),
-                autocommit=True
+                autocommit=True,
+                login_timeout=10,
+                timeout=timeout,
             )
             self.cursor = self.connection.cursor()
         except AdapterConnectionError:
@@ -62,40 +65,36 @@ class SqlServerAdapter(DBAdapter):
             raise AdapterExecutionError(f"SQL Server execute failed: {str(e)}")
 
     def begin_transaction(self) -> None:
-        if self.connection:
-            self.connection.autocommit = False
+        if self.connection and self.cursor:
+            self.cursor.execute("BEGIN TRANSACTION")
 
     def rollback(self) -> None:
         if self.connection is None:
             return
         if self.cursor:
             try:
+                self.cursor.execute("IF @@TRANCOUNT > 0 ROLLBACK")
+            except Exception:
+                pass
+            try:
                 self.cursor.close()
             except Exception:
                 pass
-            self.cursor = None
-        try:
-            self.connection.rollback()
-        except Exception:
-            pass
-        self.connection.autocommit = True
-        self.cursor = self.connection.cursor()
+            self.cursor = self.connection.cursor()
 
     def commit(self) -> None:
         if self.connection is None:
             return
         if self.cursor:
             try:
+                self.cursor.execute("IF @@TRANCOUNT > 0 COMMIT")
+            except Exception:
+                pass
+            try:
                 self.cursor.close()
             except Exception:
                 pass
-            self.cursor = None
-        try:
-            self.connection.commit()
-        except Exception:
-            pass
-        self.connection.autocommit = True
-        self.cursor = self.connection.cursor()
+            self.cursor = self.connection.cursor()
 
     def disconnect(self) -> None:
         if self.cursor:

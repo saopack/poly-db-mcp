@@ -9,7 +9,8 @@ from ..exceptions import AdapterConnectionError, AdapterExecutionError
 class KingbaseAdapter(DBAdapter):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self._supports_ddl_transaction = False
+        db_mode = (config.get('env') or {}).get('DB_MODE', '').lower()
+        self._supports_ddl_transaction = (db_mode == 'pg')
 
     def connect(self, host: str = 'localhost', port: int = None) -> None:
         db_port = port if port else self.config.get('port', 54321)
@@ -22,8 +23,8 @@ class KingbaseAdapter(DBAdapter):
                 database=self.config.get('database', 'TEST')
             )
             self.cursor = self.connection.cursor()
-            self._apply_statement_timeout()
             self.connection.autocommit = True
+            self._apply_statement_timeout()
         except OperationalError as e:
             raise AdapterConnectionError(f"Kingbase connection failed: {str(e)}")
 

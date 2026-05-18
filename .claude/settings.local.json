@@ -42,7 +42,15 @@
       "Bash(git checkout *)",
       "Bash(python -m pytest tests/ -v --tb=line)",
       "Bash(pip show *)",
-      "Bash(\"D:\\\\Program Files\\\\Python\\\\Python311\\\\python.exe\" -m pip install oracledb -q)"
+      "Bash(\"D:\\\\Program Files\\\\Python\\\\Python311\\\\python.exe\" -m pip install oracledb -q)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -m pytest tests/test_config_manager.py::TestConfigManager::test_get_db_config tests/test_config_manager.py::TestConfigManager::test_get_db_versions -v)",
+      "Bash(python -m pytest tests/test_adapters.py tests/test_executor.py -q)",
+      "Bash(python -m pytest tests/test_executor.py tests/test_adapters.py -q)",
+      "WebFetch(domain:docs.kingbase.com.cn)",
+      "Bash(python -m pytest tests/test_executor.py tests/test_adapters.py tests/test_config_manager.py -q)",
+      "Bash(python -m pytest tests/test_adapters.py -q)"
     ]
   }
 }

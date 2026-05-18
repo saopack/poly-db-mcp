@@ -23,7 +23,7 @@ class DockerManager:
 
     def warmup(self, db_type: str, version: str, config: Dict[str, Any]) -> Optional[Tuple[str, int]]:
         """Pre-start a container and add it to the warm pool for reuse."""
-        container_name = f"db-mcp-{db_type}-{version}"
+        container_name = f"db-mcp-{db_type.lower()}-{version.lower()}"
         try:
             existing = self.client.containers.get(container_name)
             if existing.status == 'running':
@@ -128,7 +128,9 @@ class DockerManager:
         image = config['image']
         port = config['port']
         if container_name is None:
-            container_name = f"db-mcp-{db_type}-{version}"
+            container_name = f"db-mcp-{db_type.lower()}-{version.lower()}"
+        else:
+            container_name = container_name.lower()
 
         logger.info(f"Starting container for {db_type}:{version} (image={image}, port={port}, name={container_name})")
 
@@ -278,3 +280,63 @@ class DockerManager:
                 return True
             time.sleep(interval)
         return False
+
+    # db_type -> known compatibility modes (matches normalized values used in container names)
+    _COMPAT_MODES = {
+        'vastbase': ['A', 'B', 'C', 'PG', 'MSSQL'],
+        'kingbase': ['oracle', 'mysql', 'pg', 'sqlserver'],
+    }
+
+    def _check_container_status(self, container_name: str, port: int) -> dict:
+        """Check a single container by name, return status dict or None if not found."""
+        try:
+            container = self.client.containers.get(container_name)
+            item = {
+                "container_name": container_name,
+                "container_running": container.status == "running",
+                "port_reachable": False,
+            }
+            if item["container_running"]:
+                try:
+                    host_port = self._get_host_port(container, port)
+                    item["host_port"] = host_port
+                    item["port_reachable"] = self.is_port_open("localhost", host_port)
+                except DockerContainerPortError:
+                    pass
+            return item
+        except NotFound:
+            return None
+        except DockerException:
+            return None
+
+    def get_containers_status(self, databases_config: dict) -> list[dict]:
+        """Return container and port status for all configured database types and versions,
+        including compatibility mode variants."""
+        result = []
+        for db_type, db_cfg in databases_config.items():
+            versions = db_cfg.get("versions", {})
+            compat_modes = self._COMPAT_MODES.get(db_type, [])
+            for version, ver_cfg in versions.items():
+                base_name = f"db-mcp-{db_type.lower()}-{version.lower()}"
+                names_to_check = [base_name]
+                for mode in compat_modes:
+                    names_to_check.append(f"{base_name}-{mode.lower()}")
+
+                for container_name in names_to_check:
+                    status = self._check_container_status(container_name, ver_cfg["port"])
+                    if status is not None:
+                        result.append({
+                            "db_type": db_type,
+                            "version": version,
+                            **status,
+                        })
+                    # For base name (no compat mode), always report even if container missing
+                    elif container_name == names_to_check[0]:
+                        result.append({
+                            "db_type": db_type,
+                            "version": version,
+                            "container_name": container_name,
+                            "container_running": False,
+                            "port_reachable": False,
+                        })
+        return result

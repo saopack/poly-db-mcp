@@ -80,7 +80,7 @@ class DifyMCPHandler:
                     type="string",
                     required=False,
                     default="A",
-                    description="Vastbase数据库兼容性模式: A=Oracle, B=MySQL, PG=PostgreSQL, MSSQL=SQL Server，默认A"
+                    description="数据库兼容性模式，支持通用名(oracle/pg/mysql/sqlserver)或Vastbase编码(A/B/C/PG/MSSQL)，自动转换为目标库格式，默认A"
                 )
             ]
         ))
@@ -88,7 +88,7 @@ class DifyMCPHandler:
         # 获取数据库列表工具
         tools.append(MCPTool(
             name="list_databases",
-            description="获取支持的数据库类型列表",
+            description="获取支持的数据库类型及版本列表",
             parameters=[]
         ))
         
@@ -180,8 +180,11 @@ class DifyMCPHandler:
             )
     
     def _list_databases(self) -> MCPResult:
-        """获取数据库类型列表"""
-        databases = ConfigManager.get_supported_databases()
+        """获取数据库类型及版本列表"""
+        databases = []
+        for db_type in ConfigManager.get_supported_databases():
+            versions = ConfigManager.get_db_versions(db_type)
+            databases.append({"type": db_type, "versions": versions})
         return MCPResult(
             status="success",
             content={"databases": databases}
