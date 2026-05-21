@@ -1,4 +1,5 @@
 """客户端管理和 Dify MCP 集成路由"""
+import asyncio
 import logging
 from typing import Dict, Any, Optional, Union
 from fastapi import APIRouter, Header, HTTPException
@@ -94,7 +95,9 @@ async def update_client(client_id: str, name: Optional[str] = None, is_active: O
 async def dify_mcp_call(request: DifyToolCallRequest, api_key: Optional[str] = Header(None, alias="Authorization")):
     if api_key:
         _require_api_key(api_key)
-    result = get_mcp_handler().call_tool(request.tool_name, request.parameters)
+    result = await asyncio.to_thread(
+        get_mcp_handler().call_tool, request.tool_name, request.parameters
+    )
     if result.status == "success":
         return DifyToolCallResponse(status="success", content=result.content)
     return DifyToolCallResponse(

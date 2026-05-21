@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch, MagicMock
 from src.executor import MCPExecutor, _split_sql_statements, _is_plsql_block
 from src.config_manager import ConfigManager
 from src.exceptions import AdapterExecutionError
+from src.container_pool import ContainerPoolCapacityError
 
 
 class TestSplitSqlStatements:
@@ -150,13 +151,95 @@ class TestPlsqlBlock:
         assert "END;" in result[0]
         assert result[1] == "SELECT 1"
 
+    def test_create_procedure_followed_by_call(self):
+        """CREATE PROCEDURE ... END; followed by CALL should be two statements."""
+        result = _split_sql_statements(
+            "CREATE OR REPLACE PROCEDURE demo_sys_context_3\n"
+            "IS\n"
+            "    v_user VARCHAR2(100);\n"
+            "BEGIN\n"
+            "    v_user := SESSION_USER;\n"
+            "    INSERT INTO log_table_3(msg) VALUES ('current user: ' || v_user);\n"
+            "END;\n"
+            "CALL demo_sys_context_3();"
+        )
+        assert len(result) == 2, f"Expected 2 statements, got {len(result)}: {result}"
+        assert result[0].startswith("CREATE OR REPLACE PROCEDURE")
+        assert "END;" in result[0]
+        assert result[1] == "CALL demo_sys_context_3()"
+
+    def test_create_procedure_followed_by_select(self):
+        """CREATE PROCEDURE ... END; followed by SELECT should be two statements."""
+        result = _split_sql_statements(
+            "CREATE PROCEDURE bar AS BEGIN NULL; END;\nSELECT 1;"
+        )
+        assert len(result) == 2
+        assert result[0].startswith("CREATE PROCEDURE")
+        assert result[1] == "SELECT 1"
+
+    def test_nested_begin_end_in_procedure(self):
+        """Nested BEGIN...END inside a procedure should be handled correctly."""
+        result = _split_sql_statements(
+            "CREATE OR REPLACE PROCEDURE nested_proc\n"
+            "IS\n"
+            "BEGIN\n"
+            "  BEGIN\n"
+            "    NULL;\n"
+            "  END;\n"
+            "  NULL;\n"
+            "END;\n"
+            "SELECT 1;"
+        )
+        assert len(result) == 2, f"Expected 2 statements, got {len(result)}: {result}"
+        assert result[0].startswith("CREATE OR REPLACE PROCEDURE")
+        assert result[1] == "SELECT 1"
+
+    def test_anonymous_block_followed_by_statement(self):
+        """Anonymous BEGIN...END followed by another statement."""
+        result = _split_sql_statements(
+            "BEGIN NULL; END;\nSELECT 1;"
+        )
+        assert len(result) == 2
+        assert result[0] == "BEGIN NULL; END;"
+        assert result[1] == "SELECT 1"
+
+    def test_declare_block_followed_by_statement(self):
+        """DECLARE...BEGIN...END followed by another statement."""
+        result = _split_sql_statements(
+            "DECLARE v INT; BEGIN v := 1; END;\nSELECT 1;"
+        )
+        assert len(result) == 2
+        assert result[0].startswith("DECLARE")
+        assert result[1] == "SELECT 1"
+
+
+def _make_mock_pool():
+    """Create a mock ContainerPool that returns a working lease with
+    a mock DB-API connection usable by any adapter's use_connection()."""
+    mock_pool = MagicMock()
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.description = [['id']]
+    mock_cursor.fetchmany.return_value = [(1,)]
+    mock_conn.cursor.return_value = mock_cursor
+    mock_conn.autocommit = True
+
+    mock_lease = MagicMock()
+    mock_lease.connection = mock_conn
+    mock_lease.container_id = 'container_id'
+    mock_lease.__enter__ = MagicMock(return_value=mock_lease)
+    mock_lease.__exit__ = MagicMock(return_value=False)
+
+    mock_pool.lease.return_value = mock_lease
+    return mock_pool, mock_lease, mock_conn, mock_cursor
+
 
 class TestMCPExecutor:
     def setup_method(self):
         ConfigManager.load_config()
 
-    @patch('src.executor.DockerManager')
-    def test_is_ddl_statement(self, MockDocker):
+    @patch('src.executor.ContainerPool')
+    def test_is_ddl_statement(self, MockPool):
         executor = MCPExecutor()
 
         assert executor._is_ddl_statement('CREATE TABLE test (id INT)') is True
@@ -170,12 +253,11 @@ class TestMCPExecutor:
         assert executor._is_ddl_statement('UPDATE test SET name = "test"') is False
         assert executor._is_ddl_statement('DELETE FROM test WHERE id = 1') is False
 
-    @patch('src.executor.DockerManager')
+    @patch('src.executor.ContainerPool')
     @patch('src.executor.ADAPTER_REGISTRY')
-    def test_run_validation_success_dml(self, MockRegistry, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = True
+    def test_execute_success_dml(self, MockRegistry, MockPool):
+        mock_pool, mock_lease, mock_conn, _ = _make_mock_pool()
+        MockPool.return_value = mock_pool
 
         mock_adapter_cls = MockRegistry.get.return_value
         mock_adapter = mock_adapter_cls.return_value
@@ -185,19 +267,19 @@ class TestMCPExecutor:
         }
 
         executor = MCPExecutor()
-        result = executor.run_validation('postgresql', '14', 'SELECT 1')
+        result = executor.execute('postgresql', '14', 'SELECT 1')
 
         assert result['status'] == 'success'
         assert 'data' in result
+        mock_adapter.use_connection.assert_called_once_with(mock_conn)
         mock_adapter.execute_with_rollback.assert_called_once_with('SELECT 1')
-        mock_docker.stop_container.assert_not_called()
+        mock_lease.mark_for_destroy.assert_not_called()
 
-    @patch('src.executor.DockerManager')
+    @patch('src.executor.ContainerPool')
     @patch('src.executor.ADAPTER_REGISTRY')
-    def test_run_validation_ddl_unsupported(self, MockRegistry, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 54321)
-        mock_docker.wait_for_port.return_value = True
+    def test_execute_ddl_unsupported(self, MockRegistry, MockPool):
+        mock_pool, mock_lease, mock_conn, _ = _make_mock_pool()
+        MockPool.return_value = mock_pool
 
         mock_adapter_cls = MockRegistry.get.return_value
         mock_adapter = mock_adapter_cls.return_value
@@ -207,71 +289,64 @@ class TestMCPExecutor:
         }
 
         executor = MCPExecutor()
-        result = executor.run_validation('kingbase', 'V8', 'CREATE TABLE test (id INT)')
+        result = executor.execute('kingbase', 'V8', 'CREATE TABLE test (id INT)')
 
         assert result['status'] == 'success'
         assert 'note' not in result
+        mock_adapter.use_connection.assert_called_once_with(mock_conn)
         assert mock_adapter.execute.call_count == 2  # CREATE TABLE + DROP TABLE (reverse)
-        mock_docker.stop_container.assert_not_called()
+        mock_lease.mark_for_destroy.assert_not_called()
 
-    @patch('src.executor.DockerManager')
-    def test_run_validation_invalid_db(self, MockDocker):
+    @patch('src.executor.ContainerPool')
+    def test_execute_invalid_db(self, MockPool):
         executor = MCPExecutor()
-        result = executor.run_validation('invalid_db', '1.0', 'SELECT 1')
+        result = executor.execute('invalid_db', '1.0', 'SELECT 1')
 
         assert result['status'] == 'error'
         assert 'Unsupported database type' in result['message']
 
-    @patch('src.executor.DockerManager')
-    def test_run_validation_timeout(self, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = False
+    @patch('src.executor.ContainerPool')
+    def test_execute_timeout(self, MockPool):
+        mock_pool = MockPool.return_value
+        mock_pool.lease.side_effect = ContainerPoolCapacityError("Lease timeout")
 
         executor = MCPExecutor()
-        result = executor.run_validation('postgresql', '14', 'SELECT 1')
+        result = executor.execute('postgresql', '14', 'SELECT 1')
 
         assert result['status'] == 'error'
-        assert 'failed to start' in result['message'].lower()
-        mock_docker.stop_container.assert_not_called()
 
-    @patch('src.executor.DockerManager')
+    @patch('src.executor.ContainerPool')
     @patch('src.executor.ADAPTER_REGISTRY')
-    def test_run_validation_adapter_exception(self, MockRegistry, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = True
+    def test_execute_adapter_exception(self, MockRegistry, MockPool):
+        mock_pool, mock_lease, mock_conn, _ = _make_mock_pool()
+        MockPool.return_value = mock_pool
 
         mock_adapter_cls = MockRegistry.get.return_value
         mock_adapter = mock_adapter_cls.return_value
-        mock_adapter.connect.side_effect = ConnectionError("Connection refused")
+        mock_adapter.supports_ddl_transaction = True
+        mock_adapter.execute_with_rollback.side_effect = AdapterExecutionError("SQL error")
 
         executor = MCPExecutor()
-        result = executor.run_validation('postgresql', '14', 'SELECT 1')
+        result = executor.execute('postgresql', '14', 'SELECT 1')
 
         assert result['status'] == 'error'
-        assert 'Connection refused' in result['message']
-        mock_docker.stop_container.assert_not_called()
+        assert 'SQL error' in result['message']
+        mock_adapter.use_connection.assert_called_once_with(mock_conn)
 
-    @patch('src.executor.DockerManager')
-    def test_run_validation_no_adapter(self, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = True
-
+    @patch('src.executor.ContainerPool')
+    def test_execute_no_adapter(self, MockPool):
         with patch('src.executor.ADAPTER_REGISTRY', {}):
             executor = MCPExecutor()
-            result = executor.run_validation('postgresql', '14', 'SELECT 1')
+            result = executor.execute('postgresql', '14', 'SELECT 1')
 
         assert result['status'] == 'error'
         assert 'No adapter found' in result['message']
 
-    @patch('src.executor.DockerManager')
+    @patch('src.executor.ContainerPool')
     @patch('src.executor.ADAPTER_REGISTRY')
-    def test_run_validation_multi_statement(self, MockRegistry, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = True
+    def test_execute_multi_statement(self, MockRegistry, MockPool):
+        mock_pool, mock_lease, mock_conn, _ = _make_mock_pool()
+        MockPool.return_value = mock_pool
 
         mock_adapter_cls = MockRegistry.get.return_value
         mock_adapter = mock_adapter_cls.return_value
@@ -281,7 +356,7 @@ class TestMCPExecutor:
         }
 
         executor = MCPExecutor()
-        result = executor.run_validation(
+        result = executor.execute(
             'postgresql', '14',
             'SELECT 1; SELECT 2; SELECT 3'
         )
@@ -299,12 +374,11 @@ class TestMCPExecutor:
         mock_adapter.begin_transaction.assert_called_once()
         mock_adapter.rollback.assert_called_once()
 
-    @patch('src.executor.DockerManager')
+    @patch('src.executor.ContainerPool')
     @patch('src.executor.ADAPTER_REGISTRY')
-    def test_run_validation_multi_statement_error_stops(self, MockRegistry, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = True
+    def test_execute_multi_statement_error_stops(self, MockRegistry, MockPool):
+        mock_pool, mock_lease, mock_conn, _ = _make_mock_pool()
+        MockPool.return_value = mock_pool
 
         mock_adapter_cls = MockRegistry.get.return_value
         mock_adapter = mock_adapter_cls.return_value
@@ -316,7 +390,7 @@ class TestMCPExecutor:
         ]
 
         executor = MCPExecutor()
-        result = executor.run_validation(
+        result = executor.execute(
             'postgresql', '14',
             'SELECT 1; BAD SQL; SELECT 3'
         )
@@ -328,12 +402,11 @@ class TestMCPExecutor:
         assert 'syntax error' in result['data'][1]['message']
         mock_adapter.rollback.assert_called_once()
 
-    @patch('src.executor.DockerManager')
+    @patch('src.executor.ContainerPool')
     @patch('src.executor.ADAPTER_REGISTRY')
-    def test_run_validation_mixed_ddl_dml(self, MockRegistry, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = True
+    def test_execute_mixed_ddl_dml(self, MockRegistry, MockPool):
+        mock_pool, mock_lease, mock_conn, _ = _make_mock_pool()
+        MockPool.return_value = mock_pool
 
         mock_adapter_cls = MockRegistry.get.return_value
         mock_adapter = mock_adapter_cls.return_value
@@ -343,7 +416,7 @@ class TestMCPExecutor:
         }
 
         executor = MCPExecutor()
-        result = executor.run_validation(
+        result = executor.execute(
             'mysql', '8.0',
             'CREATE TABLE t (id INT); INSERT INTO t VALUES (1); SELECT * FROM t'
         )
@@ -357,12 +430,11 @@ class TestMCPExecutor:
         mock_adapter.begin_transaction.assert_called_once()
         mock_adapter.rollback.assert_called_once()
 
-    @patch('src.executor.DockerManager')
+    @patch('src.executor.ContainerPool')
     @patch('src.executor.ADAPTER_REGISTRY')
-    def test_run_validation_ddl_reverse_fails_fallback(self, MockRegistry, MockDocker):
-        mock_docker = MockDocker.return_value
-        mock_docker.start_container.return_value = ('container_id', 5432)
-        mock_docker.wait_for_port.return_value = True
+    def test_execute_ddl_reverse_fails_fallback(self, MockRegistry, MockPool):
+        mock_pool, mock_lease, mock_conn, _ = _make_mock_pool()
+        MockPool.return_value = mock_pool
 
         mock_adapter_cls = MockRegistry.get.return_value
         mock_adapter = mock_adapter_cls.return_value
@@ -374,12 +446,12 @@ class TestMCPExecutor:
         ]
 
         executor = MCPExecutor()
-        result = executor.run_validation('kingbase', 'V8', 'CREATE TABLE test (id INT)')
+        result = executor.execute('kingbase', 'V8', 'CREATE TABLE test (id INT)')
 
         assert result['status'] == 'success'
         assert 'note' in result
         assert 'container will be destroyed' in result['note']
-        mock_docker.stop_container.assert_called_once_with('container_id')
+        mock_lease.mark_for_destroy.assert_called_once()
 
     def test_generate_reverse_ddl_create_table(self):
         assert MCPExecutor._generate_reverse_ddl('CREATE TABLE foo (id INT)') == 'DROP TABLE foo'

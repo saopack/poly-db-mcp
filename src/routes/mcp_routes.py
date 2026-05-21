@@ -1,6 +1,7 @@
 """MCP JSON-RPC 协议路由：initialize、tools/list、tools/call、SSE"""
 import os
 import json
+import asyncio
 import logging
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, Request, Response
@@ -14,6 +15,7 @@ router = APIRouter()
 
 MCP_SERVER_INFO = {"name": "db-mcp", "version": "1.0.0"}
 MCP_CAPABILITIES = {"tools": {}}
+_QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "300"))
 
 
 def _get_server_base_url() -> str:
@@ -86,9 +88,9 @@ def _handle_mcp_jsonrpc(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 async def mcp_root():
     base_url = _get_server_base_url()
     return {
-        "name": "MCP Database Validation Tool",
+        "name": "MCP Database Execution Tool",
         "version": "1.0.0",
-        "description": "Database SQL validation service for Dify MCP",
+        "description": "Database SQL execution service for Dify MCP",
         "oauth_metadata": {
             "issuer": base_url,
             "authorization_endpoint": f"{base_url}/authorize",
@@ -104,7 +106,18 @@ async def mcp_jsonrpc_root(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_request", "error_description": "Request body must be valid JSON"})
-    result = _handle_mcp_jsonrpc(body)
+    if body.get("method") == "tools/call":
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(_handle_mcp_jsonrpc, body), timeout=_QUERY_TIMEOUT)
+        except asyncio.TimeoutError:
+            req_id = body.get("id")
+            return JSONResponse(content={
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+            })
+    else:
+        result = _handle_mcp_jsonrpc(body)
     if result is None:
         return Response(status_code=204)
     return JSONResponse(content=result)
@@ -116,7 +129,18 @@ async def mcp_jsonrpc(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_request", "error_description": "Request body must be valid JSON"})
-    result = _handle_mcp_jsonrpc(body)
+    if body.get("method") == "tools/call":
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(_handle_mcp_jsonrpc, body), timeout=_QUERY_TIMEOUT)
+        except asyncio.TimeoutError:
+            req_id = body.get("id")
+            return JSONResponse(content={
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+            })
+    else:
+        result = _handle_mcp_jsonrpc(body)
     if result is None:
         return Response(status_code=204)
     return JSONResponse(content=result)
@@ -127,7 +151,6 @@ async def mcp_sse():
     base_url = _get_server_base_url()
 
     async def event_stream():
-        import asyncio
         yield f"event: endpoint\ndata: {base_url}/messages\n\n"
         while True:
             try:
@@ -149,7 +172,18 @@ async def mcp_messages(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_request", "error_description": "Request body must be valid JSON"})
-    result = _handle_mcp_jsonrpc(body)
+    if body.get("method") == "tools/call":
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(_handle_mcp_jsonrpc, body), timeout=_QUERY_TIMEOUT)
+        except asyncio.TimeoutError:
+            req_id = body.get("id")
+            return JSONResponse(content={
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32000, "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+            })
+    else:
+        result = _handle_mcp_jsonrpc(body)
     if result is None:
         return Response(status_code=204)
     return JSONResponse(content=result)

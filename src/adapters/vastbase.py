@@ -15,6 +15,12 @@ except ImportError:
 @register_adapter('vastbase')
 class VastbaseAdapter(DBAdapter):
     def __init__(self, config: Dict[str, Any]):
+        # Vastbase uses psycopg2 (PostgreSQL fork), API is identical.
+        # All connection-level setup (autocommit, statement_timeout) is done
+        # in connect() / use_connection(), not here — no adapter-specific
+        # preprocessing needed at construction time.
+        # DDL is transactional (PostgreSQL behavior), so the executor will
+        # wrap DDL in tx blocks rather than using non-transactional paths.
         super().__init__(config)
         self._supports_ddl_transaction = True
 
@@ -110,7 +116,4 @@ class VastbaseAdapter(DBAdapter):
         self._apply_statement_timeout()
 
     def disconnect(self) -> None:
-        if self.cursor:
-            self.cursor.close()
-        if self.connection:
-            self.connection.close()
+        self._safe_disconnect()

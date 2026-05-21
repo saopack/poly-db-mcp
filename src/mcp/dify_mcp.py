@@ -42,9 +42,10 @@ class MCPResult(BaseModel):
 
 class DifyMCPHandler:
     """Dify MCP处理器"""
-    
+
     def __init__(self):
-        self.executor = MCPExecutor()
+        from ..container_pool import ContainerPool
+        self.executor = MCPExecutor(container_pool=ContainerPool())
     
     def get_tools(self) -> List[MCPTool]:
         """获取可用的MCP工具列表"""
@@ -150,7 +151,7 @@ class DifyMCPHandler:
                 )
             )
 
-        result = self.executor.run_validation(
+        result = self.executor.execute(
             db_type, version, query,
             db_compatibility=db_compatibility
         )

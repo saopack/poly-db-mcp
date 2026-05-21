@@ -21,6 +21,7 @@ class DBAdapter(ABC):
         self._supports_ddl_transaction = False
         self._statement_timeout = config.get('statement_timeout', 30)
         self._max_rows = config.get('max_rows', 1000)
+        self._is_pooled = False
 
     @property
     def supports_ddl_transaction(self) -> bool:
@@ -29,6 +30,38 @@ class DBAdapter(ABC):
     def _apply_statement_timeout(self) -> None:
         """Apply statement timeout for the current session. Override per driver."""
         pass
+
+    def use_connection(self, conn) -> None:
+        """Use an existing DB-API connection from the connection pool.
+
+        Sets up the cursor and applies statement timeout, just like connect()
+        would, but without creating a new connection.
+        """
+        self._is_pooled = True
+        self.connection = conn
+        self.connection.autocommit = True
+        self.cursor = self.connection.cursor()
+        self._apply_statement_timeout()
+
+    def _safe_disconnect(self) -> None:
+        """Close cursor and optionally close connection.
+
+        When using a pooled connection, only closes the cursor and detaches
+        the connection (the pool manages its lifecycle).
+        When using a direct connection, closes both.
+        """
+        if self.cursor:
+            try:
+                self.cursor.close()
+            except Exception:
+                pass
+            self.cursor = None
+        if not self._is_pooled and self.connection:
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+        self.connection = None
 
     @abstractmethod
     def connect(self, host: str = 'localhost', port: int = None) -> None:

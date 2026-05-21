@@ -97,7 +97,4 @@ class SqlServerAdapter(DBAdapter):
             self.cursor = self.connection.cursor()
 
     def disconnect(self) -> None:
-        if self.cursor:
-            self.cursor.close()
-        if self.connection:
-            self.connection.close()
+        self._safe_disconnect()

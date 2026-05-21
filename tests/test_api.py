@@ -70,10 +70,10 @@ class TestAPI:
         })
         assert response.status_code == 422
 
-    @patch('src.routes.validation_routes.MCPExecutor')
-    def test_validate_sql_success(self, MockExecutor):
+    @patch('src.routes.execute_routes.MCPExecutor')
+    def test_execute_sql_success(self, MockExecutor):
         mock_executor = MockExecutor.return_value
-        mock_executor.run_validation.return_value = {
+        mock_executor.execute.return_value = {
             "status": "success",
             "data": {"columns": ["id"], "rows": [{"id": 1}], "row_count": 1}
         }

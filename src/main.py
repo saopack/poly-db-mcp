@@ -207,7 +207,7 @@ def restart_server(host: str, port: int, log_dir: str) -> bool:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MCP Database Validation Tool")
+    parser = argparse.ArgumentParser(description="MCP Database Execution Tool")
     parser.add_argument("--host", default=os.environ.get("MCP_HOST", "0.0.0.0"), help="监听地址")
     parser.add_argument("--port", type=int, default=int(os.environ.get("MCP_PORT", "8000")), help="监听端口")
     parser.add_argument("--daemon", "-d", action="store_true", help="后台启动（守护进程模式）")

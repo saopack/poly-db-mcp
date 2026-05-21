@@ -63,7 +63,7 @@ db-mcp/
 │   │   └── dify_mcp.py             # MCP 协议处理器（工具定义 + 调用）
 │   └── routes/
 │       ├── __init__.py             # 路由聚合导出
-│       ├── validation_routes.py    # SQL 执行 + 数据库信息 + 健康检查
+│       ├── execute_routes.py       # SQL 执行 + 数据库信息 + 健康检查
 │       ├── mcp_routes.py           # MCP JSON-RPC + SSE 端点
 │       ├── oauth_routes.py         # OAuth DCR / 授权 / Token 交换
 │       └── client_routes.py        # 客户端管理 + Dify MCP 集成

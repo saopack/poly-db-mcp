@@ -17,6 +17,7 @@ class VersionConfig(BaseModel):
     password: str = Field(default="", description="数据库密码")
     database: str = Field(default="", description="数据库名")
     privileged: bool = Field(default=False, description="是否特权容器")
+    prewarm: bool = Field(default=False, description="是否在启动时预热容器")
     env: Optional[Dict[str, str]] = Field(default=None, description="环境变量")
 
 
@@ -99,6 +100,7 @@ class ConfigManager:
             'database': version_config.get('database', ''),
             'env': version_config.get('env'),
             'privileged': version_config.get('privileged', False),
+            'prewarm': version_config.get('prewarm', False),
             'command': version_config.get('command'),
         }
 

@@ -1,10 +1,11 @@
-"""MCP Database Validation Tool — FastAPI 应用入口"""
+"""MCP Database Execution Tool — FastAPI 应用入口"""
+import os
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .config_manager import ConfigManager
-from .routes import mcp_router, oauth_router, client_router, validation_router
+from .routes import mcp_router, oauth_router, client_router, execute_router
 
 logger = logging.getLogger(__name__)
 
@@ -13,16 +14,23 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Loading configuration...")
     ConfigManager.load_config()
+
+    # Pre-warm containers configured with prewarm: true
+    from .container_pool import ContainerPool
+    pool = ContainerPool()
+    logger.info("Pre-warming database containers (prewarm: true)...")
+    pool.prewarm()
+    logger.info("Pre-warm complete")
+
     yield
-    logger.info("Shutting down Docker containers...")
-    from .docker_manager import DockerManager
-    dm = DockerManager()
-    dm.stop_all_warm_containers()
+
+    logger.info("Shutting down container pool...")
+    pool.shutdown()
     logger.info("Shutdown complete.")
 
 
 app = FastAPI(
-    title="MCP Database Validation Tool",
+    title="MCP Database Execution Tool",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -30,4 +38,4 @@ app = FastAPI(
 app.include_router(mcp_router)
 app.include_router(oauth_router)
 app.include_router(client_router)
-app.include_router(validation_router)
+app.include_router(execute_router)

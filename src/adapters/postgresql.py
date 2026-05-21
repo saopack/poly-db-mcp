@@ -96,7 +96,4 @@ class PostgreSQLAdapter(DBAdapter):
         self._apply_statement_timeout()
 
     def disconnect(self) -> None:
-        if self.cursor:
-            self.cursor.close()
-        if self.connection:
-            self.connection.close()
+        self._safe_disconnect()

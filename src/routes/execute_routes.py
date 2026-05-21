@@ -1,8 +1,10 @@
 """SQL执行和数据库信息路由"""
+import os
 import asyncio
 import logging
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ..config_manager import ConfigManager
@@ -12,6 +14,8 @@ from ..dependencies import get_client_registry
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("audit")
 router = APIRouter()
+
+_QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "300"))
 
 
 class ExecuteSqlRequest(BaseModel):
@@ -87,12 +91,23 @@ async def get_db_versions(db_type: str):
 async def execute_sql(request: ExecuteSqlRequest, api_key: Optional[str] = Header(None, alias="Authorization")):
     client_info = _require_api_key(api_key)
     executor = MCPExecutor()
-    result = await asyncio.to_thread(
-        executor.run_validation,
-        request.db_type, request.version, request.query,
-        db_compatibility=request.db_compatibility,
-        explain=request.explain,
-    )
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                executor.execute,
+                request.db_type, request.version, request.query,
+                db_compatibility=request.db_compatibility,
+                explain=request.explain,
+            ),
+            timeout=_QUERY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"Query timed out after {_QUERY_TIMEOUT}s: db_type={request.db_type}, version={request.version}")
+        _audit_log(client_info, request.db_type, request.version, request.query, "timeout")
+        return JSONResponse(
+            status_code=504,
+            content={"status": "error", "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+        )
     _audit_log(client_info, request.db_type, request.version, request.query, result.get("status", "error"))
     return result
 
@@ -102,9 +117,9 @@ async def shutdown():
     """Stop Docker containers and shut down the server."""
     logger.info("Shutdown requested via API")
     try:
-        from ..docker_manager import DockerManager
-        dm = DockerManager()
-        dm.stop_all_warm_containers()
+        from ..container_pool import ContainerPool
+        pool = ContainerPool()
+        pool.shutdown()
     except Exception as e:
         logger.warning(f"Error during container cleanup: {e}")
     import os
@@ -139,10 +154,9 @@ async def health_check():
     # per-database container and port status
     if checks["docker"] == "ok":
         try:
-            from ..docker_manager import DockerManager
-            dm = DockerManager()
-            db_config = ConfigManager._config.get("databases", {})
-            checks["databases"] = dm.get_containers_status(db_config)
+            from ..container_pool import ContainerPool
+            pool = ContainerPool()
+            checks["containers"] = pool.get_status()
         except Exception:
             pass
 
@@ -153,11 +167,22 @@ async def health_check():
 async def dify_execute_sql(request: ExecuteSqlRequest, api_key: Optional[str] = Header(None, alias="Authorization")):
     client_info = _require_api_key(api_key)
     executor = MCPExecutor()
-    result = await asyncio.to_thread(
-        executor.run_validation,
-        request.db_type, request.version, request.query,
-        db_compatibility=request.db_compatibility,
-        explain=request.explain,
-    )
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                executor.execute,
+                request.db_type, request.version, request.query,
+                db_compatibility=request.db_compatibility,
+                explain=request.explain,
+            ),
+            timeout=_QUERY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"Dify query timed out after {_QUERY_TIMEOUT}s: db_type={request.db_type}, version={request.version}")
+        _audit_log(client_info, request.db_type, request.version, request.query, "timeout")
+        return JSONResponse(
+            status_code=504,
+            content={"status": "error", "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+        )
     _audit_log(client_info, request.db_type, request.version, request.query, result.get("status", "error"))
     return result

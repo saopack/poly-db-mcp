@@ -14,8 +14,9 @@ DB-MCP 是一个基于 FastAPI 的 SQL 验证服务，实现了 Model Context Pr
 
 - 6 种数据库支持：Vastbase、金仓、PostgreSQL、Oracle、MySQL、SQL Server
 - 多版本：同一数据库可配置多个版本
-- 容器命名 + 幂等启动：同名容器已运行则复用
-- 容器预热池：空闲容器 TTL 5 分钟，减少重复请求冷启动
+- 共享容器 + 连接池：多请求复用同一容器，通过 DBUtils 连接池 + Semaphore 限制并发
+- 容器预热：启动时预热所有配置的 DB/版本，减少首次请求冷启动
+- 健康监控：后台线程定期检查容器端口可达性，连续 3 次失败标记 UNHEALTHY 并触发重建
 - 事务级回滚：DML 通过显式事务实现毫秒级回退
 - DDL 兜底：不支持 DDL 事务的数据库自动销毁容器
 - 多 SQL 拆分：智能状态机解析分号分隔的多条语句（处理字符串文本、标识符引用、各类注释和 dollar-quote）
@@ -26,6 +27,7 @@ DB-MCP 是一个基于 FastAPI 的 SQL 验证服务，实现了 Model Context Pr
 - 结构化审计日志
 - Pydantic 配置校验
 - 分层异常体系（精确 HTTP 状态码）
+- 异步非阻塞路由：MCP tools/call 通过 `asyncio.to_thread` 卸载到线程池
 
 ---
 
@@ -34,6 +36,7 @@ DB-MCP 是一个基于 FastAPI 的 SQL 验证服务，实现了 Model Context Pr
 - **Python**: 3.8+
 - **Web 框架**: FastAPI + uvicorn
 - **Docker**: docker SDK
+- **连接池**: DBUtils (PooledDB)
 - **数据库驱动**:
   - `psycopg2`（PostgreSQL / Vastbase / 金仓）
   - `pymysql`（MySQL）
@@ -51,14 +54,14 @@ db-mcp/
 ├── config/
 │   └── databases.yaml              # YAML 配置（Pydantic 校验）
 ├── src/
-│   ├── __init__.py                 # 公开接口导出（不含 DockerManager）
+│   ├── __init__.py                 # 公开接口导出
 │   ├── main.py                     # 入口：uvicorn 启动
-│   ├── api.py                      # FastAPI 应用创建 + lifespan + 4 路由器挂载
+│   ├── api.py                      # FastAPI 应用创建 + lifespan（预热 + 优雅关闭）
 │   ├── config_manager.py           # 配置管理（类级单例 + 线程锁 + Pydantic 模型校验）
-│   ├── docker_manager.py           # 容器生命周期（命名、幂等启动、预热池、TTL 清理）
-│   ├── executor.py                 # 执行引擎（SQL 拆分、DDL/DML 路由、异常分类处理）
+│   ├── container_pool.py           # 容器池（线程安全单例 + 连接池 + 信号量并发控制 + 健康监控）
+│   ├── executor.py                 # 执行引擎（SQL 拆分、DDL/DML 路由、异常分类处理、ContainerPool 租约）
 │   ├── exceptions.py               # 异常体系（含 http_status）
-│   ├── dependencies.py             # 惰性单例工厂（get_mcp_handler / get_client_registry）
+│   ├── dependencies.py             # 惰性单例工厂（get_mcp_handler / get_client_registry / get_container_pool）
 │   ├── client_registry.py          # 客户端注册表（API Key + OAuth，threading.Lock）
 │   ├── adapters/
 │   │   ├── __init__.py             # ADAPTER_REGISTRY 导出
@@ -73,16 +76,17 @@ db-mcp/
 │   │   ├── __init__.py
 │   │   └── dify_mcp.py             # MCP Handler：工具定义 + 调用分发
 │   └── routes/
-│       ├── __init__.py             # mcp_router, oauth_router, client_router, validation_router
+│       ├── __init__.py             # mcp_router, oauth_router, client_router, execute_router
 │       ├── mcp_routes.py           # MCP JSON-RPC (/、/mcp、/sse、/messages、/mcp/tools 等)
 │       ├── oauth_routes.py         # OAuth DCR / authorize / token
 │       ├── client_routes.py        # 客户端 CRUD + /mcp/call + OAuth 回调
-│       └── validation_routes.py    # /api/execute_sql、/api/databases、/api/health
+│       └── execute_routes.py      # /api/execute_sql、/api/databases、/api/health
 ├── tests/
 │   ├── test_adapters.py
 │   ├── test_api.py
 │   ├── test_config_manager.py
-│   └── test_executor.py
+│   ├── test_executor.py
+│   └── test_container_pool.py
 ├── requirements.txt
 └── AGENTS.md
 ```
@@ -174,14 +178,16 @@ $env:PYTHONPATH="."; python -m pytest
 | `test_adapters.py` | 适配器初始化、注册表、`_format_result` 边界 |
 | `test_api.py` | API 路由集成测试（含输入校验 422） |
 | `test_config_manager.py` | 配置加载、查询、单例隔离 |
-| `test_executor.py` | DML/DDL 路径、无效数据库、容器超时、适配器异常、SQL 拆分（dollar-quote、backtick、E-string） |
+| `test_executor.py` | DML/DDL 路径、无效数据库、容器超时、适配器异常、SQL 拆分（dollar-quote、backtick、E-string）、ContainerPool 集成 |
+| `test_container_pool.py` | ContainerPool 单例、线程安全、lease/release、信号量容量限制、并发创建防护、关闭拦截、ContainerEntry 默认值 |
 
 ### 测试策略
 
 - 纯单元测试，不依赖真实数据库或 Docker
-- Mock 外部依赖（DockerManager、适配器）
+- Mock 外部依赖（ContainerPool、适配器）
 - API 测试使用 FastAPI TestClient
 - 每个 test class 在 `setup_method` 中重置状态
+- `test_container_pool.py` 在 autouse fixture 中重置 ContainerPool 单例
 
 ---
 
@@ -201,13 +207,99 @@ $env:PYTHONPATH="."; python -m pytest
 
 `DBAdapter.execute_with_rollback()` 定义标准事务包裹逻辑（begin → execute → rollback），子类只需实现原子操作 `execute()`。
 
-### 3. 类级单例 + 线程安全
+### 3. ContainerPool 单例 + 租约模式
+
+`ContainerPool`（[container_pool.py](src/container_pool.py)）是全局唯一的线程安全单例（双重检查锁定），管理所有数据库容器的生命周期、连接池和并发控制。
+
+**数据模型**：
+
+```
+ContainerPool (单例)
+├── _entries: Dict[str, ContainerEntry]     # key = "db_type-version[-compat_mode]"
+├── _create_locks: Dict[str, Lock]          # 每个 key 一把细粒度锁，防并发创建
+├── _shutting_down: Event                   # 关闭信号
+└── _health_thread: daemon Thread           # 后台健康监控
+
+ContainerEntry (每个容器一个)
+├── state: ContainerState (STARTING/HEALTHY/UNHEALTHY/DESTROYING/STOPPED)
+├── semaphore: BoundedSemaphore(max_concurrency)  # 并发上限
+├── connection_pool: PooledDB                   # DBUtils 连接池
+├── active_leases: int                          # 当前活跃租约数
+├── condition: threading.Condition              # 状态变更通知
+├── health_failures: int                        # 连续健康检查失败次数
+└── exclusive: bool                             # DDL 独占标志
+```
+
+**核心流程**：
+
+```
+lease(db_type, version, config, compat_mode)
+  ├─ 检查 _shutting_down，已关闭则抛 ContainerPoolCapacityError
+  ├─ 获取 per-key create_lock → _ensure_healthy()
+  │   ├─ Entry 存在且 HEALTHY → 直接返回
+  │   ├─ Entry 为 DESTROYING → 抛异常让调用方重试
+  │   ├─ Entry 为 UNHEALTHY → 销毁 → 重建
+  │   └─ Entry 不存在 → 创建 ContainerEntry → _start_entry()
+  │       ├─ docker pull if not exists
+  │       ├─ _get_or_create_container() (幂等：重名容器复用)
+  │       ├─ _wait_for_port() (最多 120s)
+  │       └─ 创建 PooledDB 连接池
+  ├─ semaphore.acquire(timeout=lease_timeout)  # 排队等待
+  │   └─ 超时 → ContainerPoolCapacityError (HTTP 503)
+  ├─ connection_pool.connection() → 借出连接
+  ├─ active_leases += 1
+  └─ 返回 ContainerLease(context manager)
+
+lease.__exit__() → release(entry, conn)
+  ├─ conn.close() → 归还到 DBUtils 连接池
+  ├─ active_leases -= 1
+  └─ semaphore.release()
+```
+
+**DDL 独占访问**（MySQL/Oracle/金仓 等 non-transactional DDL 数据库）：
+
+`exclusive_lease()` 等待所有活跃租约释放后独占容器，阻止并发读写与 DDL 冲突。
+
+**健康监控**：
+
+后台 daemon 线程每 30s 检查端口可达性（`_is_port_open`），连续 3 次失败标记 UNHEALTHY → 下次 `lease()` 自动重建。同时检查 idle TTL（默认 300s），空闲容器自动销毁。
+
+**优雅关闭**：
+
+`shutdown()` 设置 `_shutting_down` Event → 拒绝新租约 → 等待 active_leases 归零（最多 30s）→ 关闭所有连接池 → stop 所有容器。
+
+### 4. 连接池
+
+**DBUtils PooledDB** 配置（[container_pool.py:98-197](src/container_pool.py#L98-L197)）：
+
+- `maxconnections = max_concurrency`（默认 10）
+- `mincached = 2`，`maxcached = 5`
+- `maxusage = 100`（单连接执行 100 次后回收）
+- `blocking = True`（池满时等待）
+
+每个容器一个独立连接池，驱动对应关系：
+- PostgreSQL / Vastbase / 金仓 → `psycopg2` + `PooledDB`
+- MySQL → `pymysql` + `PooledDB`
+- Oracle → `oracledb` + `PooledDB`（DSN 方式）
+- SQL Server → `pymssql` + `PooledDB`
+
+### 5. 适配器池化模式
+
+`DBAdapter` 新增两个方法（[base.py](src/adapters/base.py)）：
+
+- `use_connection(conn)` — 标记 `_is_pooled = True`，直接使用池连接（不创建新连接），创建 cursor，应用 `statement_timeout`
+- `_safe_disconnect()` — 池化模式下只关闭 cursor 和清空引用（不关闭底层 socket）；非池化模式行为不变（真正 disconnect）
+
+所有适配器的 `disconnect()` 改为调用 `self._safe_disconnect()`，对池化/非池化上下文透明。
+
+### 6. 类级单例 + 线程安全
 
 - `ConfigManager`：类变量 `_config` + `threading.Lock()`
+- `ContainerPool`：模块级 `_instance` + `_instance_lock`（双重检查锁定）
 - `ClientRegistry`：实例变量 + `threading.Lock()` 保护所有字典操作
 - `dependencies.py`：惰性单例工厂函数，避免 Docker SDK 在模块导入时报错
 
-### 4. 异常体系
+### 7. 异常体系
 
 ```
 MCPError (500)
@@ -220,14 +312,16 @@ MCPError (500)
 ├── DockerError (500)
 │   ├── DockerContainerStartError (500)
 │   └── DockerContainerPortError (500)
+├── ContainerPoolCapacityError (503)     # 新：并发超限 / 关闭中
 └── ValidationError (422)
 ```
 
 每个异常类携带 `http_status`，可在全局异常处理器中直接映射到 HTTP 响应。
 
-### 5. SQL 拆分状态机
+### 8. SQL 拆分 + PL/pgSQL 块识别
 
-`executor._split_sql_statements()` 是模块级函数，按字符遍历 SQL 文本，正确处理：
+`executor._split_sql_statements()` 按字符遍历 SQL 文本，正确处理以下上下文中的分号不应作为语句分隔符：
+
 - 单行注释 `--`
 - 块注释 `/* */`
 - 单引号字符串 `'...'`（含 `''` 转义）
@@ -236,11 +330,15 @@ MCPError (500)
 - Backtick 标识符 `` `...` ``
 - E 转义字符串 `E'...'`
 
-仅当分号出现在这些上下文之外时才作为语句分隔符。
+PL/pgSQL 匿名块和存储过程通过 BEGIN/END 嵌套深度计数识别：`_is_plsql_block()` 检测 `DECLARE...BEGIN...END;` 和 `BEGIN...END;` 模式，排除裸 `BEGIN` 和 `BEGIN TRANSACTION`。遇到 `END;` 时深度减一，深度归零表示块结束，后续分号才作为语句分隔。支持嵌套 `CREATE PROCEDURE ... END;` / `CALL ...();` 的拆分（[test_executor.py:154-169](tests/test_executor.py#L154-L169)）。
 
-### 6. 容器预热池
+### 9. 启动预热
 
-`DockerManager._warm_pool: Dict[str, float]` 记录容器最后使用时间。`_try_reuse_warm_container()` 在启动前先检查是否存在已运行的容器并更新 TTL。`_cleanup_stale_warm_containers()` 清理 5 分钟未使用的闲置容器。
+`ContainerPool.prewarm()` 在 lifespan startup 中调用，遍历配置中所有 DB/版本/兼容模式组合，并行启动容器 + 建连接池。环境变量 `MCP_PREWARM=false` 可跳过预热（按需启动）。
+
+### 10. 异步非阻塞路由
+
+MCP `tools/call` JSON-RPC 端点和 Dify 工具调用通过 `asyncio.to_thread()` 将 SQL 执行卸载到线程池，避免阻塞 FastAPI 事件循环。
 
 ---
 
@@ -256,7 +354,7 @@ is_ddl AND NOT adapter.supports_ddl_transaction?
              数据干净，容器正常 stop 即可复用
 ```
 
-**关键结论：数据能回滚 = 容器可复用。** 只有 DDL 在不支持事务的数据库（金仓、Oracle、MySQL）上执行时，数据才无法回退，才需要销毁容器。支持 DDL 事务的数据库（Vastbase、PostgreSQL、SQL Server）即使是 DDL 也通过 `execute_with_rollback` 回滚，容器保持干净。
+**关键结论：数据能回滚 = 容器可复用。** 只有 DDL 在不支持事务的数据库（金仓、Oracle、MySQL）上执行时，数据才无法通过事务回退。此时先尝试生成反向 DDL（如 `DROP TABLE`）清理数据；反向 DDL 失败时，fallback 到销毁容器（`mark_for_destroy()`）。支持 DDL 事务的数据库（Vastbase、PostgreSQL、SQL Server）即使是 DDL 也通过 `execute_with_rollback` 回滚，容器保持干净。
 
 ### DML（INSERT / UPDATE / DELETE / SELECT）
 
@@ -278,10 +376,19 @@ is_ddl AND NOT adapter.supports_ddl_transaction?
 
 ### 容器生命周期
 
-- 所有容器 `run_validation()` 的 `finally` 块中调用 `stop_container()`
-- 数据干净的容器：stop 后可由预热池重新启动复用
-- 数据脏的容器（DDL 无事务）：`stop_container()` 停止后，下次请求会创建新容器
-- 预热池 TTL 5 分钟，超时自动清理闲置容器
+```
+请求 → lease() → [semaphore] → borrow 连接 → use_connection() → execute → release()
+                                                                              ├─ conn.close() → 归还池
+                                                                              ├─ semaphore.release()
+                                                                              └─ mark_for_destroy? → destroy_container()
+```
+
+- **DML 执行**：事务包裹 + ROLLBACK，数据零残留 → 容器保留，连接归还池
+- **DDL（事务型 DB）**：同 DML，通过 `execute_with_rollback` 回滚 → 容器保留
+- **DDL（非事务型 DB）**：直接执行 → `lease.mark_for_destroy()` → release 后异步销毁容器 → 下次 lease 自动重建
+- **DDL 反向清理失败**：reverse DDL 执行失败时 fallback 到 `mark_for_destroy()`，响应中带 "container will be destroyed" 提示
+- **空闲 TTL**：`MCP_CONTAINER_IDLE_TTL`（默认 300s），健康监控线程自动清理
+- **健康检查**：每 30s 探测端口，连续 3 次失败触发重建
 
 ---
 
@@ -320,6 +427,48 @@ databases:
 
 ---
 
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `MCP_PREWARM` | `true` | 启动时预热所有配置的容器 |
+| `MCP_MAX_CONCURRENCY` | `10` | 单容器最大并发执行数（信号量上限） |
+| `MCP_LEASE_TIMEOUT` | `30` | 信号量等待超时秒数，超时返回 503 |
+| `MCP_CONTAINER_IDLE_TTL` | `300` | 空闲容器自动销毁时间（秒） |
+| `MCP_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔（秒） |
+| `MCP_RESOURCE_CPU_<TYPE>` | 见下表 | 覆盖数据库容器的 CPU 限制（核数） |
+| `MCP_RESOURCE_MEM_<TYPE>` | 见下表 | 覆盖数据库容器的内存限制（如 `512m`、`2g`） |
+
+### 容器资源限制（官方最低要求）
+
+启动容器时通过 `mem_limit` + `nano_cpus` 施加资源上限，防止单个容器耗尽宿主机资源。按数据库类型的默认值如下，可在 `databases.yaml` 的 `resources` 字段或环境变量中覆盖：
+
+| 数据库 | CPU | 内存 | 依据 |
+|--------|-----|------|------|
+| PostgreSQL | 1 | 512m | 官方镜像最低 |
+| Vastbase | 1 | 1g | 基于 PostgreSQL，保守 1GB |
+| Kingbase | 2 | 2g | 官方最低 4核/2GB（容器轻载下调） |
+| MySQL | 1 | 512m | 官方最低 512MB |
+| Oracle | 1 | 1g | XE 最低 1GB |
+| SQL Server | 2 | 2g | Docker 硬性最低 2GB |
+
+覆盖优先级：`MCP_RESOURCE_*` 环境变量 > `databases.yaml` `resources` 字段 > 默认值。
+
+`databases.yaml` 示例：
+```yaml
+postgresql:
+  versions:
+    "14":
+      image: "postgres:14"
+      port: 5432
+      ...
+      resources:
+        cpu: 2
+        memory: "1g"
+```
+
+---
+
 ## 已知限制
 
 - 无 `pyproject.toml` / `setup.py`：纯 requirements.txt 驱动
@@ -328,3 +477,4 @@ databases:
 - 日志仅通过 `logging.basicConfig` 简单配置，无文件轮转
 - 客户端数据仅存内存，重启丢失
 - API Key 固定 3600 秒过期（token 响应中声明），但实际未强制过期
+- `docker_manager.py` 已废弃，功能由 `container_pool.py` 替代，旧文件保留待清理

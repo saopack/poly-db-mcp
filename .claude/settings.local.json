@@ -50,7 +50,26 @@
       "Bash(python -m pytest tests/test_executor.py tests/test_adapters.py -q)",
       "WebFetch(domain:docs.kingbase.com.cn)",
       "Bash(python -m pytest tests/test_executor.py tests/test_adapters.py tests/test_config_manager.py -q)",
-      "Bash(python -m pytest tests/test_adapters.py -q)"
+      "Bash(python -m pytest tests/test_adapters.py -q)",
+      "Bash(python -m pytest tests/test_container_pool.py -v)",
+      "Bash(\"D:\\\\Program Files\\\\Python\\\\Python311\\\\python.exe\" -m pip install DBUtils==3.1.0)",
+      "Bash(python -m pytest tests/test_adapters.py tests/test_config_manager.py tests/test_api.py -v)",
+      "Bash(git stash *)",
+      "Bash(python -m pytest tests/test_config_manager.py::TestConfigManager::test_get_db_config tests/test_api.py::TestAPI::test_validate_sql_success -v)",
+      "Bash(python -m pytest tests/test_container_pool.py tests/test_executor.py -v)",
+      "Bash(python -m pytest tests/test_executor.py tests/test_container_pool.py tests/test_api.py -v)",
+      "Bash(python -m pytest tests/test_executor.py tests/test_container_pool.py tests/test_api.py tests/test_adapters.py tests/test_config_manager.py -v)",
+      "Bash(curl -s http://172.16.105.102:8000/api/health)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python -m json.tool)",
+      "Bash(curl -s http://172.16.105.102:8000/api/databases)",
+      "Bash(curl -s -X POST http://172.16.105.102:8000/api/clients/register -H \"Content-Type: application/json\" -d \"{\\\\\"name\\\\\":\\\\\"concurrency-test\\\\\"}\")",
+      "Bash(python tests/concurrency_test.py)",
+      "Bash(curl -s -X POST http://172.16.105.102:8000/api/execute_sql -H \"Authorization: Bearer mcp-nDua-kiyHDIPxEAyx-23WLppHohv1CBIdzSWVtF5GHQ\" -H \"Content-Type: application/json\" -d \"{\\\\\"db_type\\\\\":\\\\\"vastbase\\\\\",\\\\\"version\\\\\":\\\\\"2.2.15\\\\\",\\\\\"query\\\\\":\\\\\"SELECT 1\\\\\"}\")",
+      "Bash(curl -s -X POST http://172.16.105.102:8000/register -H \"Content-Type: application/json\" -d \"{\\\\\"client_name\\\\\":\\\\\"concurrency-test\\\\\"}\")",
+      "Bash(curl -s -X POST http://172.16.105.102:8000/register -H \"Content-Type: application/json\" -d \"{\\\\\"client_name\\\\\":\\\\\"concurrency-test\\\\\",\\\\\"redirect_uris\\\\\":[\\\\\"http://localhost:8080/callback\\\\\"]}\")",
+      "Bash(curl -s -o /dev/null -w \"%{redirect_url}\" -X GET \"http://172.16.105.102:8000/authorize?response_type=code&client_id=9633e932-14e4-4758-a15b-557c09a176ba&redirect_uri=http://localhost:8080/callback\")",
+      "Bash(curl -s -X POST http://172.16.105.102:8000/token -H \"Content-Type: application/x-www-form-urlencoded\" -d \"grant_type=authorization_code&code=mcp-auth-llS6eA_PObZUTafJUboiNwAhvujH8I5-ftrXMH8FzaE&client_id=9633e932-14e4-4758-a15b-557c09a176ba&client_secret=uFzpPpGlwUivQ3t9ofH80CrFfDvuBeifKlC1Km5ffeI&redirect_uri=http://localhost:8080/callback\")"
     ]
   }
 }
