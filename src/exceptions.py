@@ -51,6 +51,11 @@ class DockerContainerPortError(DockerError):
     http_status = 500
 
 
+class DockerBuildTimeoutError(DockerError):
+    """Docker 镜像构建超时。"""
+    http_status = 504
+
+
 class ValidationError(MCPError):
     """输入验证错误。"""
     http_status = 422

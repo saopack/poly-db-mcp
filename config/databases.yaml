@@ -1,5 +1,28 @@
 databases:
   vastbase:
+    nexus:
+      domain: "http://ip:port"
+      username: "username"
+      password: "password"
+      repository: "vastbase-software"
+      package:
+        psu:
+          path_template: "安装包/VastbaseG100/G100打穿包/{version_code}/{psu}"
+          file_pattern: "Vastbase-G100-{major}.{minor}_Build{build}.*-Linux-x86_64-no_mot-.*\\.tar\\.gz"
+        build:
+          keyword_template: "Vastbase-G100-{major}.{minor}_Build{build}_{build_num}-Linux-x86_64-no_mot-"
+    defaults:
+      base_image: "vastbase-g100-base:v0.0.1"
+      port: 5432
+      adapter: "VastbaseAdapter"
+      username: "vbmcp"
+      password: "Vastbase@123"
+      database: "postgres"
+      privileged: true
+      env:
+        VB_USERNAME: "vbmcp"
+        VB_PASSWORD: "Vastbase@123"
+        USER_PRIVILEGE: "sysadmin"
     versions:
       "3.0.8":
         image: "vastbase-g100-single-v1.4-3.0.8.29407-linux-x86_64:20260513111853"

@@ -7,7 +7,6 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
-from ..mcp import DifyMCPHandler
 from ..dependencies import get_mcp_handler
 
 logger = logging.getLogger(__name__)
@@ -15,7 +14,7 @@ router = APIRouter()
 
 MCP_SERVER_INFO = {"name": "db-mcp", "version": "1.0.0"}
 MCP_CAPABILITIES = {"tools": {}}
-_QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "300"))
+_QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "3600"))
 
 
 def _get_server_base_url() -> str:
@@ -114,7 +113,7 @@ async def mcp_jsonrpc_root(request: Request):
             return JSONResponse(content={
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+                "error": {"code": -32000, "message": f"Request timed out after {_QUERY_TIMEOUT}s. If this is a first-time ephemeral build, retry after the image is cached."},
             })
     else:
         result = _handle_mcp_jsonrpc(body)
@@ -137,7 +136,7 @@ async def mcp_jsonrpc(request: Request):
             return JSONResponse(content={
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+                "error": {"code": -32000, "message": f"Request timed out after {_QUERY_TIMEOUT}s. If this is a first-time ephemeral build, retry after the image is cached."},
             })
     else:
         result = _handle_mcp_jsonrpc(body)
@@ -180,7 +179,7 @@ async def mcp_messages(request: Request):
             return JSONResponse(content={
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+                "error": {"code": -32000, "message": f"Request timed out after {_QUERY_TIMEOUT}s. If this is a first-time ephemeral build, retry after the image is cached."},
             })
     else:
         result = _handle_mcp_jsonrpc(body)

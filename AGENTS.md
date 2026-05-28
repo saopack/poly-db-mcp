@@ -52,17 +52,21 @@ DB-MCP 是一个基于 FastAPI 的 SQL 验证服务，实现了 Model Context Pr
 ```
 db-mcp/
 ├── config/
-│   └── databases.yaml              # YAML 配置（Pydantic 校验）
+│   ├── databases.yaml              # YAML 配置（Pydantic 校验）
+│   └── dockerfile_templates/       # Dockerfile 模板目录
+│       └── vastbase/
 ├── src/
 │   ├── __init__.py                 # 公开接口导出
-│   ├── main.py                     # 入口：uvicorn 启动
+│   ├── main.py                     # 入口：uvicorn 启动，支持 --daemon/--stop/--restart
 │   ├── api.py                      # FastAPI 应用创建 + lifespan（预热 + 优雅关闭）
 │   ├── config_manager.py           # 配置管理（类级单例 + 线程锁 + Pydantic 模型校验）
 │   ├── container_pool.py           # 容器池（线程安全单例 + 连接池 + 信号量并发控制 + 健康监控）
 │   ├── executor.py                 # 执行引擎（SQL 拆分、DDL/DML 路由、异常分类处理、ContainerPool 租约）
 │   ├── exceptions.py               # 异常体系（含 http_status）
-│   ├── dependencies.py             # 惰性单例工厂（get_mcp_handler / get_client_registry / get_container_pool）
+│   ├── dependencies.py             # 惰性单例工厂（get_mcp_handler / get_client_registry）
 │   ├── client_registry.py          # 客户端注册表（API Key + OAuth，threading.Lock）
+│   ├── nexus_client.py             # Nexus 仓库客户端（搜索 + 下载）
+│   ├── package_manager.py          # 包管理器（从 Nexus 下载/解压/缓存二进制）
 │   ├── adapters/
 │   │   ├── __init__.py             # ADAPTER_REGISTRY 导出
 │   │   ├── base.py                 # DBAdapter 抽象基类 + register_adapter 装饰器
@@ -262,7 +266,7 @@ lease.__exit__() → release(entry, conn)
 
 **健康监控**：
 
-后台 daemon 线程每 30s 检查端口可达性（`_is_port_open`），连续 3 次失败标记 UNHEALTHY → 下次 `lease()` 自动重建。同时检查 idle TTL（默认 300s），空闲容器自动销毁。
+后台 daemon 线程每 30s 检查端口可达性（`_is_port_open`），连续 3 次失败标记 UNHEALTHY → 下次 `lease()` 自动重建。每日午夜清理今日未使用的容器（last_used 不是今天 & active_leases=0）。
 
 **优雅关闭**：
 
@@ -334,7 +338,7 @@ PL/pgSQL 匿名块和存储过程通过 BEGIN/END 嵌套深度计数识别：`_i
 
 ### 9. 启动预热
 
-`ContainerPool.prewarm()` 在 lifespan startup 中调用，遍历配置中所有 DB/版本/兼容模式组合，并行启动容器 + 建连接池。环境变量 `MCP_PREWARM=false` 可跳过预热（按需启动）。
+`ContainerPool.prewarm()` 在 lifespan startup 中调用，遍历配置中所有标记 `prewarm: true` 的 DB/版本组合，启动容器 + 建连接池。
 
 ### 10. 异步非阻塞路由
 
@@ -387,7 +391,7 @@ is_ddl AND NOT adapter.supports_ddl_transaction?
 - **DDL（事务型 DB）**：同 DML，通过 `execute_with_rollback` 回滚 → 容器保留
 - **DDL（非事务型 DB）**：直接执行 → `lease.mark_for_destroy()` → release 后异步销毁容器 → 下次 lease 自动重建
 - **DDL 反向清理失败**：reverse DDL 执行失败时 fallback 到 `mark_for_destroy()`，响应中带 "container will be destroyed" 提示
-- **空闲 TTL**：`MCP_CONTAINER_IDLE_TTL`（默认 300s），健康监控线程自动清理
+- **空闲 TTL**：`MCP_CONTAINER_IDLE_TTL`（默认 86400s），健康监控线程在每日午夜清理今日未使用且无活跃租约的容器
 - **健康检查**：每 30s 探测端口，连续 3 次失败触发重建
 
 ---
@@ -418,11 +422,11 @@ databases:
 
 | 数据库 | 版本 | 端口 | DDL 事务 |
 |--------|------|------|---------|
-| Vastbase | 3.0.8.29407, 3.0.9.31338 | 5432 | 是 |
+| Vastbase | 2.2.15, 3.0.8, 3.0.9 | 5432 | 是 |
 | PostgreSQL | 12, 13, 14 | 5432 | 是 |
 | SQL Server | 2017, 2019 | 1433 | 是 |
-| 金仓 | V8 | 54321 | 否 |
-| Oracle | 11c, 12c, 18c, 19c | 1521 | 否 |
+| 金仓 | V8, V9 | 54321 | 否（PG 模式下为是） |
+| Oracle | 11c, 12c, 18c, 19c, 21c | 1521 | 否 |
 | MySQL | 5.6, 5.7, 8.0 | 3306 | 否 |
 
 ---
@@ -431,10 +435,10 @@ databases:
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `MCP_PREWARM` | `true` | 启动时预热所有配置的容器 |
+| `MCP_PREWARM` | — | （未实现）无独立跳过预热的环境变量，预热始终执行 |
 | `MCP_MAX_CONCURRENCY` | `10` | 单容器最大并发执行数（信号量上限） |
 | `MCP_LEASE_TIMEOUT` | `30` | 信号量等待超时秒数，超时返回 503 |
-| `MCP_CONTAINER_IDLE_TTL` | `300` | 空闲容器自动销毁时间（秒） |
+| `MCP_CONTAINER_IDLE_TTL` | `86400` | 空闲容器保留时间（秒），默认 24 小时，超时后次日午夜清理 |
 | `MCP_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔（秒） |
 | `MCP_RESOURCE_CPU_<TYPE>` | 见下表 | 覆盖数据库容器的 CPU 限制（核数） |
 | `MCP_RESOURCE_MEM_<TYPE>` | 见下表 | 覆盖数据库容器的内存限制（如 `512m`、`2g`） |
@@ -474,7 +478,9 @@ postgresql:
 - 无 `pyproject.toml` / `setup.py`：纯 requirements.txt 驱动
 - 无 CI/CD：没有 `.github/workflows` 或 `.gitlab-ci.yml`
 - 无类型检查工具配置（mypy、pylint、black 等）
-- 日志仅通过 `logging.basicConfig` 简单配置，无文件轮转
 - 客户端数据仅存内存，重启丢失
 - API Key 固定 3600 秒过期（token 响应中声明），但实际未强制过期
-- `docker_manager.py` 已废弃，功能由 `container_pool.py` 替代，旧文件保留待清理
+- `list_db_versions` 仅返回 databases.yaml 中静态配置的版本，不包含 ephemeral（Nexus 自动构建）版本
+- Vastbase 3.0.9 配置使用了 3.0.8 镜像（可用的相同基础镜像）
+- 健康监控仅对端口可达性做检查，不验证数据库服务是否正常响应 SQL
+- 无速率限制（QPS throttling）

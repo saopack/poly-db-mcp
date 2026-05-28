@@ -9,9 +9,6 @@ from .config_manager import ConfigManager
 from .adapters import ADAPTER_REGISTRY
 from .container_pool import ContainerPool, ContainerPoolCapacityError
 from .exceptions import (
-    MCPError,
-    DatabaseNotFoundError,
-    AdapterError,
     AdapterConnectionError,
     AdapterExecutionError,
     AdapterTimeoutError,
@@ -605,6 +602,10 @@ class MCPExecutor:
         query: str,
         db_compatibility: Optional[str] = None,
         explain: bool = False,
+        params: Optional[str] = None,
+        postgresql_conf: Optional[str] = None,
+        pg_hba_conf: Optional[str] = None,
+        extra_files: Optional[list] = None,
     ) -> Dict[str, Any]:
         # 统一小写，ConfigManager 内部做大小写不敏感匹配
         db_type = db_type.lower()
@@ -625,15 +626,13 @@ class MCPExecutor:
         # 兼容性模式：入参自动归一化为目标库所需名称
         _COMPAT_MAP = {
             # vastbase codes         vastbase     kingbase
-            'A':                     {'vastbase': 'A',       'kingbase': 'oracle'},
-            'B':                     {'vastbase': 'B',       'kingbase': 'mysql'},
-            'C':                     {'vastbase': 'C',       'kingbase': 'sqlserver'},
-            'PG':                    {'vastbase': 'PG',      'kingbase': 'pg'},
-            'MSSQL':                 {'vastbase': 'MSSQL',   'kingbase': 'sqlserver'},
+            'a':                     {'vastbase': 'A',       'kingbase': 'oracle'},
+            'b':                     {'vastbase': 'B',       'kingbase': 'mysql'},
+            'pg':                    {'vastbase': 'PG',      'kingbase': 'pg'},
+            'mssql':                 {'vastbase': 'MSSQL',   'kingbase': 'sqlserver'},
             # generic aliases
             'oracle':                {'vastbase': 'A',       'kingbase': 'oracle'},
             'mysql':                 {'vastbase': 'B',       'kingbase': 'mysql'},
-            'pg':                    {'vastbase': 'PG',      'kingbase': 'pg'},
             'sqlserver':             {'vastbase': 'MSSQL',   'kingbase': 'sqlserver'},
         }
         _COMPAT_ENV_VAR = {
@@ -642,7 +641,7 @@ class MCPExecutor:
         }
         compat_value = ""
         if db_compatibility and db_type in _COMPAT_ENV_VAR:
-            compat_info = _COMPAT_MAP.get(db_compatibility)
+            compat_info = _COMPAT_MAP.get(db_compatibility.lower())
             if compat_info and db_type in compat_info:
                 compat_value = compat_info[db_type]
                 env = config.get('env', {})
@@ -659,9 +658,59 @@ class MCPExecutor:
         adapter = AdapterClass(config)
         destroy_container = False
 
+        # Binary prep for versions not in databases.yaml: download + extract
+        # from Nexus, then volume-mount into a base-image container that stays
+        # in the pool for reuse. Cleaned up at midnight if unused that day.
+        if config.get('needs_binary_prep'):
+            nexus_config = ConfigManager.get_nexus_config(db_type)
+            if not nexus_config:
+                return {
+                    "status": "error",
+                    "message": f"No nexus config for {db_type}, cannot prepare binaries"
+                }
+            from .package_manager import PackageManager
+            package_mgr = PackageManager()
+            try:
+                binary_path = package_mgr.prepare_binaries(
+                    db_type, version, nexus_config
+                )
+            except Exception as e:
+                logger.error(f"Failed to prepare binaries for {db_type} {version}: {e}")
+                return {"status": "error", "message": str(e)}
+            config = dict(config)
+            config['volumes'] = {
+                binary_path: {'bind': '/home/vastbase/vastbase', 'mode': 'rw'}
+            }
+
+        # One-shot containers with custom params/config files.
+        # These containers stay in the pool and are cleaned up at midnight
+        # if unused that day.
+        is_ephemeral = bool(params or postgresql_conf or pg_hba_conf or extra_files)
+        ephemeral_kwargs = None
+        if is_ephemeral:
+            ephemeral_kwargs = {
+                'params': params,
+                'postgresql_conf': postgresql_conf,
+                'pg_hba_conf': pg_hba_conf,
+                'extra_files': extra_files,
+            }
+
         try:
             try:
-                lease = self._pool.lease(db_type, version, config, compat_value)
+                if is_ephemeral:
+                    logger.info(
+                        f"Executor: requesting ephemeral container for {db_type} {version}"
+                        f"{' (compat=' + compat_value + ')' if compat_value else ''}"
+                    )
+                    lease = self._pool.lease_ephemeral(
+                        db_type, version, config, compat_value,
+                        ephemeral_kwargs=ephemeral_kwargs,
+                    )
+                else:
+                    lease = self._pool.lease(db_type, version, config, compat_value)
+            except ContainerPoolCapacityError as e:
+                logger.error(f"Container capacity error: {e}")
+                return {"status": "error", "message": str(e)}
             except Exception as e:
                 logger.error(f"Failed to acquire container lease: {e}")
                 return {"status": "error", "message": str(e)}
@@ -669,13 +718,30 @@ class MCPExecutor:
             try:
                 container_id = lease.container_id
                 adapter.use_connection(lease.connection)
-                logger.info(f"Connected to {db_type} (pooled)")
+                logger.info(f"Connected to {db_type}{' (ephemeral)' if is_ephemeral else ' (pooled)'}")
 
                 statements = _split_sql_statements(query)
                 logger.info(f"Split into {len(statements)} statement(s)")
 
                 if not statements:
                     return {"status": "error", "message": "No SQL statements found"}
+
+                if is_ephemeral:
+                    # Ephemeral path: execute directly, no rollback.
+                    # Container is destroyed on lease.__exit__, guaranteeing isolation.
+                    if len(statements) == 1:
+                        return self._execute_one(adapter, statements[0])
+
+                    results = []
+                    for stmt in statements:
+                        try:
+                            entry = {"statement": stmt, **self._execute_one(adapter, stmt)}
+                        except Exception as e:
+                            entry = {"statement": stmt, "status": "error", "message": str(e)}
+                        results.append(entry)
+                        if entry["status"] == "error":
+                            break
+                    return {"status": "success", "data": results}
 
                 if len(statements) == 1:
                     result = self._execute_single(adapter, statements[0])

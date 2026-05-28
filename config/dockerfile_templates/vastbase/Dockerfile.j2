@@ -1,0 +1,54 @@
+FROM openeuler/openeuler:24.03-lts-sp2
+
+ARG PACKAGE_FILE
+
+# Install system dependencies (PostgreSQL-compatible minimal set)
+RUN yum install -y bzip2 libaio shadow-utils util-linux findutils glibc-all-langpacks glibc-locale-source && \
+    yum clean all
+
+RUN rm -f /usr/lib/locale/locale-archive && \
+    localedef -c -f UTF-8 -i en_US en_US.UTF-8 && \
+    localedef -c -f UTF-8 -i zh_CN zh_CN.UTF-8 && \
+    localedef -c -f GB18030 -i zh_CN zh_CN.gb18030
+# Create vastbase user and directories
+RUN groupadd -r vastbase && useradd -r -g vastbase vastbase && \
+    mkdir -p /home/vastbase/data /home/vastbase/vastbase && \
+    chown -R vastbase:vastbase /home/vastbase && \
+    mkdir -p /docker-entrypoint-initdb.d && \
+    chown -R vastbase:vastbase /docker-entrypoint-initdb.d
+
+# Copy and extract Vastbase package
+# Two package formats:
+#   Basic:  outer.tar.gz → vastbase-installer/*.tar.gz → *.tar.bz2 → DB
+#   PSU:    outer.tar.gz → vastbase-installer/Vastbase-G100-*.tar.gz → DB (directly)
+COPY --chown=vastbase:vastbase ${PACKAGE_FILE} /tmp/
+RUN mkdir -p /tmp/vastbase_outer && \
+    tar -xf /tmp/${PACKAGE_FILE} -C /tmp/vastbase_outer && \
+    tar -xf /tmp/vastbase_outer/vastbase-installer/*.tar.gz -C /tmp/vastbase_outer && \
+    tar -xf /tmp/vastbase_outer/*.tar.bz2 -C /home/vastbase/vastbase && \
+    rm -rf /tmp/${PACKAGE_FILE} /tmp/vastbase_outer
+
+# Symlink the extracted directory to /usr/local/vastbase
+RUN ln -s /home/vastbase/vastbase /usr/local/vastbase && \
+    chown -R vastbase:vastbase /usr/local/vastbase
+
+COPY --chown=root:root gosu /usr/local/bin/gosu
+RUN chmod +x /usr/local/bin/gosu
+
+ENV PGDATA=/home/vastbase/data
+ENV GAUSSHOME=/usr/local/vastbase
+ENV GAUSSLOG=/home/vastbase/log
+ENV PATH=/usr/local/vastbase/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/vastbase/lib:${LD_LIBRARY_PATH}
+ENV LANG=en_US.UTF-8 \
+    LC_CTYPE=zh_CN.UTF-8 \
+    LC_TIME=en_US.UTF-8
+
+COPY entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 5432
+STOPSIGNAL SIGINT
+
+ENTRYPOINT ["entrypoint.sh"]
+CMD ["vastbase"]

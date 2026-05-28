@@ -68,7 +68,7 @@ class DifyMCPHandler:
                     name="version",
                     type="string",
                     required=True,
-                    description="数据库版本"
+                    description="数据库版本。Vastbase支持三种格式: 基础版本(3.0.8)、PSU补丁版本(3.0.8.psu0)、指定Build号(3.0.8.24875)；Kingbase: v8/v9；PostgreSQL: 12/13/14；Oracle: 11c/12c/18c/19c/21c；MySQL: 5.6/5.7/8.0；SQL Server: 2017/2019"
                 ),
                 MCPToolParameter(
                     name="query",
@@ -81,8 +81,43 @@ class DifyMCPHandler:
                     type="string",
                     required=False,
                     default="A",
-                    description="数据库兼容性模式，支持通用名(oracle/pg/mysql/sqlserver)或Vastbase编码(A/B/C/PG/MSSQL)，自动转换为目标库格式，默认A"
-                )
+                    description="数据库兼容性模式，支持通用名(oracle/pg/mysql/sqlserver)或Vastbase编码(A/B/PG/MSSQL)，自动转换为目标库格式，默认A"
+                ),
+                MCPToolParameter(
+                    name="params",
+                    type="string",
+                    required=False,
+                    default="",
+                    description="GUC参数配置，每行一个，格式: work_mem=2MB\\nwal_buffers=16MB。仅Vastbase临时版本生效。"
+                ),
+                MCPToolParameter(
+                    name="postgresql_conf",
+                    type="string",
+                    required=False,
+                    default="",
+                    description="postgresql.conf 文件内容(base64编码或纯文本)。仅Vastbase临时版本生效。"
+                ),
+                MCPToolParameter(
+                    name="pg_hba_conf",
+                    type="string",
+                    required=False,
+                    default="",
+                    description="pg_hba.conf 文件内容(base64编码或纯文本)。仅Vastbase临时版本生效。"
+                ),
+                MCPToolParameter(
+                    name="extra_files",
+                    type="string",
+                    required=False,
+                    default="",
+                    description="额外挂载文件列表，JSON数组格式: [{\"name\": \"init.sql\", \"content\": \"base64内容\"}]。文件统一放到 /docker-entrypoint-initdb.d/。仅Vastbase临时版本生效。"
+                ),
+                MCPToolParameter(
+                    name="explain",
+                    type="boolean",
+                    required=False,
+                    default=False,
+                    description="是否使用EXPLAIN模式查看执行计划而不实际执行"
+                ),
             ]
         ))
         
@@ -151,9 +186,22 @@ class DifyMCPHandler:
                 )
             )
 
+        extra_files_raw = parameters.get("extra_files")
+        extra_files = None
+        if extra_files_raw:
+            try:
+                extra_files = json.loads(extra_files_raw) if isinstance(extra_files_raw, str) else extra_files_raw
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         result = self.executor.execute(
             db_type, version, query,
-            db_compatibility=db_compatibility
+            db_compatibility=db_compatibility,
+            explain=parameters.get("explain", False),
+            params=parameters.get("params"),
+            postgresql_conf=parameters.get("postgresql_conf"),
+            pg_hba_conf=parameters.get("pg_hba_conf"),
+            extra_files=extra_files,
         )
         
         if result["status"] == "success":

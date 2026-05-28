@@ -7,10 +7,13 @@ with a per-container semaphore limiting concurrent executions.
 """
 
 import os
+import base64
+from datetime import date
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import time
+import tempfile
 import threading
 import logging
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Dict, Optional, Tuple, Any
@@ -48,7 +51,7 @@ class ContainerEntry:
     max_concurrency: int = 10
     semaphore: Optional[threading.BoundedSemaphore] = None
     last_used: float = 0.0
-    idle_ttl: int = 300
+    idle_ttl: int = 86400
     destroying: bool = False
     exclusive: bool = False
     health_failures: int = 0
@@ -97,13 +100,13 @@ def _make_container_key(db_type: str, version: str, compat_mode: str = "") -> st
 # ---------------------------------------------------------------------------
 
 _DEFAULT_RESOURCE_LIMITS = {
-    "postgresql": {"cpu": 1, "memory": "512m"},
-    "vastbase":   {"cpu": 1, "memory": "1g"},
-    "kingbase":   {"cpu": 2, "memory": "2g"},
-    "mysql":      {"cpu": 1, "memory": "512m"},
-    "oracle":     {"cpu": 1, "memory": "1g"},
-    "sqlserver":  {"cpu": 2, "memory": "2g"},
-    "mssql":      {"cpu": 2, "memory": "2g"},
+    # "postgresql": {"cpu": 1, "memory": "512m"},
+    # "vastbase":   {"cpu": 1, "memory": "1g"},
+    # "kingbase":   {"cpu": 2, "memory": "2g"},
+    # "mysql":      {"cpu": 1, "memory": "512m"},
+    # "oracle":     {"cpu": 1, "memory": "1g"},
+    # "sqlserver":  {"cpu": 2, "memory": "2g"},
+    # "mssql":      {"cpu": 2, "memory": "2g"},
 }
 
 
@@ -150,6 +153,7 @@ def _psycopg2_pool_factory(config: dict, host: str, port: int, max_conn: int) ->
         maxcached=min(5, max_conn),
         maxusage=100,
         blocking=True,
+        ping=1,
         host=host,
         port=port,
         user=config.get('username', 'postgres'),
@@ -238,6 +242,7 @@ _POOL_FACTORIES = {
     'mysql': _pymysql_pool_factory,
     'oracle': _oracledb_pool_factory,
     'sqlserver': _pymssql_pool_factory,
+    'mssql': _pymssql_pool_factory,
 }
 
 
@@ -267,16 +272,18 @@ class ContainerPool:
         self._docker_client: Optional[Any] = None
         self._max_concurrency = int(os.environ.get('MCP_MAX_CONCURRENCY', '10'))
         self._lease_timeout = int(os.environ.get('MCP_LEASE_TIMEOUT', '30'))
-        self._idle_ttl = int(os.environ.get('MCP_CONTAINER_IDLE_TTL', '300'))
+        self._db_ready_timeout = int(os.environ.get('MCP_DB_READY_TIMEOUT', '300'))
+        self._idle_ttl = int(os.environ.get('MCP_CONTAINER_IDLE_TTL', '86400'))
         self._health_interval = int(os.environ.get('MCP_HEALTH_CHECK_INTERVAL', '30'))
         self._health_thread: Optional[threading.Thread] = None
+        self._last_cleanup_date: Optional[str] = None
 
     # ---- public API -------------------------------------------------------
 
     @property
     def docker_client(self):
         if self._docker_client is None:
-            self._docker_client = docker.from_env()
+            self._docker_client = docker.from_env(timeout=60)
         return self._docker_client
 
     def shutdown(self):
@@ -329,7 +336,15 @@ class ContainerPool:
             )
 
         try:
-            conn = entry.connection_pool.connection()
+            with ThreadPoolExecutor(max_workers=1) as _pool:
+                future = _pool.submit(entry.connection_pool.connection)
+                conn = future.result(timeout=self._lease_timeout)
+        except FutureTimeoutError:
+            entry.semaphore.release()
+            raise ContainerPoolCapacityError(
+                f"Timed out waiting for a DB connection after {self._lease_timeout}s "
+                f"for {db_type} {version}"
+            )
         except Exception:
             entry.semaphore.release()
             raise
@@ -376,6 +391,204 @@ class ContainerPool:
             raise
 
         return ContainerLease(self, entry, conn)
+
+    def lease_ephemeral(self, db_type: str, version: str, config: dict,
+                        compat_mode: str = "",
+                        ephemeral_kwargs: dict = None) -> ContainerLease:
+        """Acquire a container with custom config mounts (postgresql.conf etc.).
+
+        The container is registered in the pool for reuse and will be cleaned
+        up at midnight if unused that day.
+        """
+        if self._shutting_down.is_set():
+            raise ContainerPoolCapacityError("Server is shutting down")
+
+        suffix = os.urandom(4).hex()
+        key = _make_container_key(db_type, version, compat_mode)
+        container_key = f"{key}-{suffix}"
+        container_name = f"db-mcp-{container_key}"
+
+        entry = ContainerEntry(
+            container_name=container_name,
+            db_type=db_type,
+            version=version,
+            compat_mode=compat_mode,
+            max_concurrency=self._max_concurrency,
+            idle_ttl=self._idle_ttl,
+        )
+        with self._pool_lock:
+            self._entries[container_key] = entry
+
+        entry.state = ContainerState.STARTING
+        logger.info(f"ContainerPool: starting container {container_name} with custom config")
+
+        try:
+            self._pull_image_if_not_exists(config['image'])
+            container_id, host_port = self._create_ephemeral_container(
+                container_name, config, db_type, ephemeral_kwargs
+            )
+            entry.container_id = container_id
+            entry.host_port = host_port
+            logger.info(
+                f"ContainerPool: container {container_name} started on port {host_port}"
+            )
+
+            logger.info(
+                f"ContainerPool: Waiting for {db_type} on 127.0.0.1:{host_port} "
+                f"(timeout={self._db_ready_timeout}s) ..."
+            )
+            if not self._wait_for_db_ready('127.0.0.1', host_port, config, db_type,
+                                           max_wait=self._db_ready_timeout):
+                self._remove_container(container_name)
+                raise RuntimeError(
+                    f"Container {container_name} database not ready "
+                    f"after {self._db_ready_timeout}s on port {host_port}"
+                )
+            logger.info(f"ContainerPool: Database ready on 127.0.0.1:{host_port}")
+
+            pool_factory = _POOL_FACTORIES.get(db_type)
+            if pool_factory is None:
+                raise RuntimeError(f"No connection pool factory for {db_type}")
+            entry.connection_pool = pool_factory(config, '127.0.0.1', host_port,
+                                                 entry.max_concurrency)
+
+            entry.state = ContainerState.HEALTHY
+            entry.health_failures = 0
+            entry.last_used = time.time()
+            logger.info(f"ContainerPool: container {container_name} ready on port {host_port}")
+
+        except Exception as e:
+            logger.error(f"ContainerPool: failed to start {container_name}: {e}")
+            entry.state = ContainerState.STOPPED
+            with self._pool_lock:
+                if container_key in self._entries:
+                    del self._entries[container_key]
+            raise
+
+        acquired = entry.semaphore.acquire(timeout=self._lease_timeout)
+        if not acquired:
+            raise ContainerPoolCapacityError(
+                f"Too many concurrent requests for {db_type} {version}. "
+                f"Max: {entry.max_concurrency}. Please retry later."
+            )
+
+        try:
+            conn = entry.connection_pool.connection()
+        except Exception:
+            entry.semaphore.release()
+            raise
+
+        with self._pool_lock:
+            entry.active_leases += 1
+            entry.last_used = time.time()
+
+        return ContainerLease(self, entry, conn)
+
+    def _create_ephemeral_container(self, container_name: str, config: dict,
+                                     db_type: str, ephemeral_kwargs: dict = None
+                                     ) -> Tuple[str, int]:
+        """Create a one-shot container with auto_remove and optional env/volume injection."""
+        image = config['image']
+        port = config['port']
+
+        run_kwargs = {
+            'image': image,
+            'name': container_name,
+            'ports': {f"{port}/tcp": None},
+            'detach': True,
+            'remove': False,
+            'privileged': config.get('privileged', False),
+        }
+
+        # Apply resource limits (CPU / memory)
+        if db_type:
+            limits = _resolve_resource_limits(db_type, config)
+            # run_kwargs['mem_limit'] = limits['memory']
+            # run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
+            logger.info(
+                f"ContainerPool: {container_name} resource limits: "
+                f"cpu={limits['cpu']}, memory={limits['memory']} (disabled)"
+            )
+
+        env = config.get('env')
+        if env:
+            env = dict(env)
+
+        if ephemeral_kwargs:
+            if ephemeral_kwargs.get('params'):
+                if env is None:
+                    env = {}
+                env['OTHER_PG_CONF'] = ephemeral_kwargs['params']
+
+            temp_dirs = []
+            volumes = {}
+            for conf_key, conf_filename in [
+                ('postgresql_conf', 'postgresql.conf'),
+                ('pg_hba_conf', 'pg_hba.conf'),
+            ]:
+                content = ephemeral_kwargs.get(conf_key)
+                if content:
+                    tmpdir = tempfile.mkdtemp(prefix=f"db-mcp-conf-{container_name}-")
+                    temp_dirs.append(tmpdir)
+                    conf_path = os.path.join(tmpdir, conf_filename)
+                    try:
+                        decoded = base64.b64decode(content.encode()).decode()
+                    except Exception:
+                        decoded = content
+                    with open(conf_path, 'w', encoding='utf-8') as f:
+                        f.write(decoded)
+                    volumes[conf_path] = {
+                        'bind': f'/docker-entrypoint-initdb.d/{conf_filename}',
+                        'mode': 'ro',
+                    }
+                    logger.info(f"ContainerPool: mounted {conf_filename} for {container_name}")
+
+            # Mount extra files to /docker-entrypoint-initdb.d/
+            extra_files = ephemeral_kwargs.get('extra_files') if ephemeral_kwargs else None
+            if extra_files:
+                for ef in extra_files:
+                    file_name = ef.name if hasattr(ef, 'name') else ef['name']
+                    content = ef.content if hasattr(ef, 'content') else ef['content']
+                    tmpdir = tempfile.mkdtemp(prefix=f"db-mcp-extra-{container_name}-")
+                    temp_dirs.append(tmpdir)
+                    local_path = os.path.join(tmpdir, file_name)
+                    try:
+                        decoded = base64.b64decode(content.encode()).decode()
+                    except Exception:
+                        decoded = content
+                    with open(local_path, 'w', encoding='utf-8') as f:
+                        f.write(decoded)
+                    volumes[local_path] = {
+                        'bind': f'/docker-entrypoint-initdb.d/{file_name}',
+                        'mode': 'ro',
+                    }
+                    logger.info(f"ContainerPool: mounted extra file {file_name} for {container_name}")
+
+            if volumes:
+                run_kwargs['volumes'] = volumes
+
+        # Merge config-level volumes (e.g. binary mount from PackageManager)
+        config_volumes = config.get('volumes')
+        if config_volumes:
+            if 'volumes' not in run_kwargs:
+                run_kwargs['volumes'] = {}
+            run_kwargs['volumes'].update(config_volumes)
+
+        if env:
+            run_kwargs['environment'] = env
+
+        if config.get('command'):
+            run_kwargs['command'] = config['command']
+
+        container = self.docker_client.containers.run(**run_kwargs)
+        container.reload()
+        if container.status != 'running':
+            raise RuntimeError(
+                f"Ephemeral container {container_name} failed to start (status: {container.status})"
+            )
+
+        host_port = self._get_host_port(container, port)
+        return container.id, host_port
 
     def release(self, entry: ContainerEntry, conn: Any):
         try:
@@ -440,34 +653,46 @@ class ContainerPool:
 
     def _health_monitor_loop(self):
         while not self._shutting_down.wait(self._health_interval):
+            # Snapshot healthy entries to avoid holding lock during socket I/O
             with self._pool_lock:
-                for key, entry in list(self._entries.items()):
-                    if entry.state != ContainerState.HEALTHY:
-                        continue
-            # Check port outside lock to avoid holding it during socket I/O
-            if not self._is_port_open('localhost', entry.host_port):
-                with self._pool_lock:
-                    entry.health_failures += 1
-                    if entry.health_failures >= 3 and entry.state == ContainerState.HEALTHY:
-                        logger.warning(
-                            f"ContainerPool: {key} health check failed {entry.health_failures} times, "
-                            "marking UNHEALTHY"
-                        )
-                        entry.state = ContainerState.UNHEALTHY
-            else:
-                with self._pool_lock:
-                    entry.health_failures = 0
+                snapshot = [
+                    (key, entry) for key, entry in self._entries.items()
+                    if entry.state == ContainerState.HEALTHY
+                ]
+            for key, entry in snapshot:
+                if not self._is_port_open('127.0.0.1', entry.host_port):
+                    with self._pool_lock:
+                        if key not in self._entries:
+                            continue
+                        entry.health_failures += 1
+                        if entry.health_failures >= 3 and entry.state == ContainerState.HEALTHY:
+                            logger.warning(
+                                f"ContainerPool: {key} health check failed {entry.health_failures} times, "
+                                "marking UNHEALTHY"
+                            )
+                            entry.state = ContainerState.UNHEALTHY
+                else:
+                    with self._pool_lock:
+                        if key in self._entries:
+                            entry.health_failures = 0
 
-            # Idle TTL check
-            with self._pool_lock:
-                for key, entry in list(self._entries.items()):
-                    if (entry.state == ContainerState.HEALTHY
-                            and entry.active_leases == 0
-                            and not entry.exclusive
-                            and time.time() - entry.last_used > self._idle_ttl):
-                        logger.info(f"ContainerPool: destroying idle container {key}")
-                        self._destroy_entry(entry, reason="idle TTL expired")
-                        del self._entries[key]
+            # Midnight cleanup: remove containers not used today
+            today = date.today().isoformat()
+            if self._last_cleanup_date != today:
+                self._last_cleanup_date = today
+                with self._pool_lock:
+                    for key, entry in list(self._entries.items()):
+                        if (entry.state == ContainerState.HEALTHY
+                                and entry.active_leases == 0
+                                and not entry.exclusive):
+                            last_used_date = date.fromtimestamp(entry.last_used).isoformat()
+                            if last_used_date != today:
+                                logger.info(
+                                    f"ContainerPool: midnight cleanup removing container {key} "
+                                    f"(last used: {last_used_date})"
+                                )
+                                self._destroy_entry(entry, reason="midnight cleanup")
+                                del self._entries[key]
 
     def _ensure_healthy(self, db_type: str, version: str, config: dict,
                         compat_mode: str = "") -> ContainerEntry:
@@ -512,7 +737,6 @@ class ContainerPool:
 
     def _start_entry(self, entry: ContainerEntry, config: dict, db_type: str):
         entry.state = ContainerState.STARTING
-        logger.info(f"ContainerPool: starting container {entry.container_name}")
 
         try:
             self._pull_image_if_not_exists(config['image'])
@@ -522,13 +746,20 @@ class ContainerPool:
             entry.container_id = container_id
             entry.host_port = host_port
 
-            if not self._wait_for_db_ready('localhost', host_port, config, db_type):
+            logger.info(
+                f"ContainerPool: Waiting for {db_type} on 127.0.0.1:{host_port} "
+                f"(timeout={self._db_ready_timeout}s) ..."
+            )
+            if not self._wait_for_db_ready('127.0.0.1', host_port, config, db_type,
+                                           max_wait=self._db_ready_timeout):
                 raise RuntimeError(f"Container {entry.container_name} database on port {host_port} not ready")
+            logger.info(f"ContainerPool: Database ready on 127.0.0.1:{host_port}")
 
             pool_factory = _POOL_FACTORIES.get(db_type)
             if pool_factory is None:
                 raise RuntimeError(f"No connection pool factory for {db_type}")
-            entry.connection_pool = pool_factory(config, 'localhost', host_port,
+            logger.info(f"ContainerPool: creating connection pool for {entry.container_name}")
+            entry.connection_pool = pool_factory(config, '127.0.0.1', host_port,
                                                  entry.max_concurrency)
 
             entry.state = ContainerState.HEALTHY
@@ -554,10 +785,25 @@ class ContainerPool:
             if existing.status == 'running':
                 try:
                     host_port = self._get_host_port(existing, port)
+                    logger.info(f"ContainerPool: reusing running container {container_name} on port {host_port}")
                     return existing.id, host_port
                 except Exception:
                     logger.warning(f"Container {container_name} has no port mapping, removing...")
-            self._remove_container(container_name)
+                    self._remove_container(container_name)
+            elif existing.status in ('exited', 'stopped', 'created'):
+                logger.info(f"Container {container_name} exists but is {existing.status}, starting...")
+                try:
+                    existing.start()
+                    existing.reload()
+                    host_port = self._get_host_port(existing, port)
+                    logger.info(f"Container {container_name} restarted on port {host_port}")
+                    return existing.id, host_port
+                except Exception as e:
+                    logger.warning(f"Failed to start existing container {container_name}: {e}, removing...")
+                    self._remove_container(container_name)
+            else:
+                logger.warning(f"Container {container_name} in unexpected status {existing.status}, removing...")
+                self._remove_container(container_name)
 
         return self._create_and_start(container_name, config, db_type)
 
@@ -578,11 +824,11 @@ class ContainerPool:
         # Apply resource limits (CPU / memory)
         if db_type:
             limits = _resolve_resource_limits(db_type, config)
-            run_kwargs['mem_limit'] = limits['memory']
-            run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
+            # run_kwargs['mem_limit'] = limits['memory']
+            # run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
             logger.info(
                 f"ContainerPool: {container_name} resource limits: "
-                f"cpu={limits['cpu']}, memory={limits['memory']}"
+                f"cpu={limits['cpu']}, memory={limits['memory']} (disabled)"
             )
 
         env = config.get('env')
@@ -591,6 +837,14 @@ class ContainerPool:
 
         if config.get('command'):
             run_kwargs['command'] = config['command']
+
+        volumes = config.get('volumes')
+        if volumes:
+            run_kwargs['volumes'] = volumes
+            logger.info(
+                f"ContainerPool: {container_name} mounting volumes: "
+                f"{list(volumes.keys())}"
+            )
 
         try:
             container = self.docker_client.containers.run(**run_kwargs)
@@ -679,14 +933,30 @@ class ContainerPool:
                            max_wait: int = 120, interval: int = 3) -> bool:
         """Wait until the database is ready to accept connections and execute queries."""
         start = time.time()
+        attempt = 0
+        last_error = None
         while time.time() - start < max_wait:
-            if self._try_db_connect(host, port, config, db_type):
+            attempt += 1
+            ok, err = self._try_db_connect(host, port, config, db_type)
+            if ok:
                 return True
+            if err != last_error:
+                logger.info(
+                    f"ContainerPool: DB not ready on {host}:{port} "
+                    f"(attempt {attempt}): {err}"
+                )
+                last_error = err
             time.sleep(interval)
+        logger.error(
+            f"ContainerPool: DB still not ready after {attempt} attempts "
+            f"({max_wait}s), last error: {last_error}"
+        )
         return False
 
-    def _try_db_connect(self, host: str, port: int, config: dict, db_type: str) -> bool:
-        """Try a single connection + SELECT 1 to verify the DB is truly ready."""
+    def _try_db_connect(self, host: str, port: int, config: dict, db_type: str) -> tuple:
+        """Try a single connection + SELECT 1 to verify the DB is truly ready.
+        Returns (True, None) on success, (False, error_message) on failure.
+        """
         try:
             dt = db_type.lower()
             if dt in ('postgresql', 'vastbase', 'kingbase'):
@@ -699,7 +969,7 @@ class ContainerPool:
                     connect_timeout=5,
                 )
                 conn.close()
-                return True
+                return True, None
             elif dt == 'mysql':
                 import pymysql
                 conn = pymysql.connect(
@@ -710,7 +980,7 @@ class ContainerPool:
                     connect_timeout=5,
                 )
                 conn.close()
-                return True
+                return True, None
             elif dt == 'oracle':
                 import oracledb
                 database = config.get('database', 'XE')
@@ -722,7 +992,7 @@ class ContainerPool:
                     tcp_connect_timeout=5,
                 )
                 conn.close()
-                return True
+                return True, None
             elif dt in ('sqlserver', 'mssql'):
                 import pymssql
                 conn = pymssql.connect(
@@ -733,15 +1003,11 @@ class ContainerPool:
                     login_timeout=5,
                 )
                 conn.close()
-                return True
+                return True, None
             else:
-                return self._is_port_open(host, port, timeout=3)
-        except Exception:
-            return False
-
-
-# Vastbase / Kingbase compatibility modes (used by prewarm)
-# _COMPAT_MODES_MAP = {
-#     'vastbase': ['A', 'B', 'C', 'PG', 'MSSQL'],
-#     'kingbase': ['oracle', 'mysql', 'pg', 'sqlserver'],
-# }
+                port_open = self._is_port_open(host, port, timeout=3)
+                if port_open:
+                    return True, None
+                return False, f"port {port} not reachable"
+        except Exception as e:
+            return False, str(e)

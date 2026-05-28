@@ -5,7 +5,6 @@ from .container_pool import ContainerPool
 
 _mcp_handler = None
 _client_registry = None
-_container_pool = None
 
 
 def get_mcp_handler() -> DifyMCPHandler:
@@ -20,10 +19,3 @@ def get_client_registry():
     if _client_registry is None:
         _client_registry = get_registry()
     return _client_registry
-
-
-def get_container_pool() -> ContainerPool:
-    global _container_pool
-    if _container_pool is None:
-        _container_pool = ContainerPool()
-    return _container_pool

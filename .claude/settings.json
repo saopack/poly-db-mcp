@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s --max-time 5 http://172.16.107.133:8000/api/health)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(f'{c[\\\\\"db_type\\\\\"]} {c[\\\\\"version\\\\\"]}: running={c[\\\\\"container_running\\\\\"]}, port={c[\\\\\"port_reachable\\\\\"]}'\\) for c in d['checks']['containers'][:5]]\")",
+      "Bash(curl -s --max-time 10 http://172.16.107.133:8000/api/health)",
+      "Bash(python -c \"from src.container_pool import ContainerPool; print\\('OK'\\)\")",
+      "Bash(mysql -h 172.16.133.107 -P 8000 -u root -p'Huawei@123' -e \"SELECT 1 AS test;\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import docker; print\\(docker.__file__\\)\")",
+      "Bash(python -c \"import docker; print\\(docker.__file__\\)\")",
+      "Read(//d/Program Files/Python/Python311/Lib/site-packages/docker/api/**)",
+      "Read(//d/Program Files/Python/Python311/Lib/site-packages/docker/types/**)",
+      "Read(//d/Program Files/Python/Python311/Lib/site-packages/docker/**)",
+      "Bash(mkdir -p \"d:\\\\work\\\\workspace\\\\workspacepri\\\\poly-db-mcp\\\\.claude\\\\skills\")",
+      "Bash(mkdir -p \"d:/work/workspace/workspacepri/poly-db-mcp/.claude/skills\")"
+    ],
+    "additionalDirectories": [
+      "d:\\work\\workspace\\workspacepri\\poly-db-mcp\\.claude"
+    ]
+  }
+}

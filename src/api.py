@@ -1,5 +1,4 @@
 """MCP Database Execution Tool — FastAPI 应用入口"""
-import os
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI

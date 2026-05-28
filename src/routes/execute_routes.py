@@ -2,7 +2,7 @@
 import os
 import asyncio
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -15,15 +15,24 @@ logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("audit")
 router = APIRouter()
 
-_QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "300"))
+_QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "3600"))
+
+
+class ExtraFile(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, description="文件名，如 init.sql、cert.pem")
+    content: str = Field(..., min_length=1, max_length=100000, description="文件内容(base64编码或纯文本)")
 
 
 class ExecuteSqlRequest(BaseModel):
     db_type: str
-    version: str
+    version: str = Field(..., description="数据库版本，支持三种格式: 基础版本(3.0.8)、PSU补丁版本(3.0.8.psu0)、指定Build号(3.0.8.24875)")
     query: str = Field(..., min_length=1, max_length=5000)
-    db_compatibility: Optional[str] = Field(None, description="数据库兼容性模式，支持通用名(oracle/pg/mysql/sqlserver)或Vastbase编码(A/B/C/PG/MSSQL)，自动转换为目标库格式")
+    db_compatibility: Optional[str] = Field(None, description="数据库兼容性模式，支持通用名(oracle/pg/mysql/sqlserver)或Vastbase编码(A/B/PG/MSSQL)，自动转换为目标库格式")
     explain: bool = Field(False, description="是否使用EXPLAIN模式查看执行计划而不实际执行")
+    params: Optional[str] = Field(None, max_length=10000, description="GUC参数配置，每行一个，格式: work_mem=2MB\\nwal_buffers=16MB。仅Vastbase临时版本生效。")
+    postgresql_conf: Optional[str] = Field(None, max_length=50000, description="postgresql.conf 文件内容(base64编码或纯文本)。仅Vastbase临时版本生效。")
+    pg_hba_conf: Optional[str] = Field(None, max_length=10000, description="pg_hba.conf 文件内容(base64编码或纯文本)。仅Vastbase临时版本生效。")
+    extra_files: Optional[List[ExtraFile]] = Field(None, description="额外挂载文件列表。仅Vastbase临时版本生效。")
 
     @field_validator('query')
     @classmethod
@@ -98,15 +107,30 @@ async def execute_sql(request: ExecuteSqlRequest, api_key: Optional[str] = Heade
                 request.db_type, request.version, request.query,
                 db_compatibility=request.db_compatibility,
                 explain=request.explain,
+                params=request.params,
+                postgresql_conf=request.postgresql_conf,
+                pg_hba_conf=request.pg_hba_conf,
+                extra_files=request.extra_files,
             ),
             timeout=_QUERY_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        logger.error(f"Query timed out after {_QUERY_TIMEOUT}s: db_type={request.db_type}, version={request.version}")
+        logger.error(
+            f"Query timed out after {_QUERY_TIMEOUT}s: "
+            f"db_type={request.db_type}, version={request.version}"
+        )
         _audit_log(client_info, request.db_type, request.version, request.query, "timeout")
         return JSONResponse(
             status_code=504,
-            content={"status": "error", "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+            content={
+                "status": "error",
+                "message": (
+                    f"Request timed out after {_QUERY_TIMEOUT}s. "
+                    "If this is a first-time ephemeral build, the Docker image may "
+                    "still be building. Check server logs for build progress. "
+                    "Retry after the image is cached."
+                ),
+            },
         )
     _audit_log(client_info, request.db_type, request.version, request.query, result.get("status", "error"))
     return result
@@ -174,15 +198,30 @@ async def dify_execute_sql(request: ExecuteSqlRequest, api_key: Optional[str] = 
                 request.db_type, request.version, request.query,
                 db_compatibility=request.db_compatibility,
                 explain=request.explain,
+                params=request.params,
+                postgresql_conf=request.postgresql_conf,
+                pg_hba_conf=request.pg_hba_conf,
+                extra_files=request.extra_files,
             ),
             timeout=_QUERY_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        logger.error(f"Dify query timed out after {_QUERY_TIMEOUT}s: db_type={request.db_type}, version={request.version}")
+        logger.error(
+            f"Dify query timed out after {_QUERY_TIMEOUT}s: "
+            f"db_type={request.db_type}, version={request.version}"
+        )
         _audit_log(client_info, request.db_type, request.version, request.query, "timeout")
         return JSONResponse(
             status_code=504,
-            content={"status": "error", "message": f"Query timed out after {_QUERY_TIMEOUT}s"},
+            content={
+                "status": "error",
+                "message": (
+                    f"Request timed out after {_QUERY_TIMEOUT}s. "
+                    "If this is a first-time ephemeral build, the Docker image may "
+                    "still be building. Check server logs for build progress. "
+                    "Retry after the image is cached."
+                ),
+            },
         )
     _audit_log(client_info, request.db_type, request.version, request.query, result.get("status", "error"))
     return result

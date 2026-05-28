@@ -23,7 +23,7 @@ DB-MCP 定位为智能答疑平台的数据库 SQL 验证中间层：
 | 数据库 | 版本 | 适配器 | DDL 事务 | 状态 |
 |--------|------|--------|----------|------|
 | Vastbase | 2.2.15, 3.0.8, 3.0.9 | VastbaseAdapter | 支持 | 已实现 |
-| 金仓 Kingbase | V8 | KingbaseAdapter | 不支持 | 已实现 |
+| 金仓 Kingbase | V8, V9 | KingbaseAdapter | PG 模式支持 | 已实现 |
 | PostgreSQL | 12, 13, 14 | PostgreSQLAdapter | 支持 | 已实现 |
 | Oracle | 11c, 12c, 18c, 19c, 21c | OracleAdapter | 不支持 | 已实现 |
 | MySQL | 5.6, 5.7, 8.0 | MySQLAdapter | 不支持 | 已实现 |
@@ -44,20 +44,23 @@ DB-MCP 定位为智能答疑平台的数据库 SQL 验证中间层：
 | Unicode 空白字符清理 | 自动替换全角空格等 Unicode 空白字符，防止从网页/中文输入法粘贴的 SQL 报错 |
 | PL/SQL 块保护 | 不拆分 DECLARE/BEGIN...END、CREATE FUNCTION/PROCEDURE/PACKAGE 等块内的分号 |
 
-### 2.3 Docker 容器管理（docker_manager.py）— 2d
+### 2.3 Docker 容器管理（container_pool.py）— 2d
 
 | 功能 | 说明 |
 |------|------|
 | 镜像管理 | 自动 pull 缺失镜像 |
 | 幂等启动 | 已运行的容器直接复用 |
 | 端口自动映射 | 获取 Docker 分配的 HostPort（10s 重试） |
-| 预热池 | 空闲容器 5 分钟内复用，过期自动清理 |
-| 容器销毁 | DDL 污染容器 stop 后不预热，后续请求重建 |
-| 关机清理 | `stop_all_warm_containers()` 在服务退出时执行 |
-| 端口检测 | TCP socket 探测等待容器就绪（最长 120s） |
-| 特权容器 | 支持 `privileged: true` 配置（Vastbase 需要） |
-| 自定义命令 | 支持 `command` 配置参数（如 MySQL 8.0 认证插件参数） |
-| 宿主机环境变量 | 从 YAML 配置注入到容器的环境变量 |
+| 预热池 | 启动时预热 prewarm: true 的容器，空闲容器午夜清理 |
+| 连接池 | DBUtils PooledDB，每容器一个独立连接池 |
+| 并发控制 | BoundedSemaphore 限制单容器并发数（默认 10） |
+| 健康监控 | 后台 daemon 线程端口探测，连续 3 次失败标记 UNHEALTHY |
+| 容器销毁 | DDL 污染或健康异常容器 stop + remove |
+| 关机清理 | shutdown() 等待活跃租约释放后关闭所有容器 |
+| 特权容器 | 支持 `privileged: true` 配置 |
+| 自定义命令 | 支持 `command` 配置参数（如 MySQL 认证插件参数） |
+| 资源限制 | CPU + 内存限制，三级覆盖：默认值 → YAML → 环境变量 |
+| ephemeral 容器 | 支持定制参数/配置文件的一次性容器 |
 
 ### 2.4 认证与安全（client_registry.py + oauth_routes.py）— 1d
 
@@ -124,7 +127,7 @@ DB-MCP 定位为智能答疑平台的数据库 SQL 验证中间层：
 | 模块 | 核心文件 | 工作量 | 说明 |
 |------|----------|--------|------|
 | SQL 执行引擎 | executor.py | 3d | 最复杂的模块。多语句拆分（分号、引号、Dollar-quote、注释、PL/SQL 块保护）；DDL 正则检测 + 7 种反向 DDL 生成；DML 事务回滚 / DDL 兜底销毁两条执行路径；事务型与非事务型 DB 的多语句编排策略；连接重试（24次/120s）；Unicode 空白字符标准化；Oracle 终止符处理 |
-| Docker 容器管理 | docker_manager.py | 2d | 镜像自动拉取、容器幂等启动、端口自动映射（10s 重试获取 HostPort）、TCP 端口探测等待就绪；预热池机制（5min TTL，过期清理，关机全停）；环境变量/特权模式/自定义 command 注入；DDL 污染容器的销毁重建路径 |
+| Docker 容器管理 | container_pool.py | 2d | 镜像自动拉取、容器幂等启动、端口自动映射（10s 重试获取 HostPort）、TCP 端口探测等待就绪；连接池管理（DBUtils PooledDB）、并发控制（BoundedSemaphore）、健康监控（daemon 线程端口探测 + 午夜空闲清理）；环境变量/特权模式/自定义 command 注入；DDL 污染容器的销毁重建路径 |
 | 数据库适配器 | adapters/ (base + 6 个) | 2d | 抽象基类定义 connect/execute/begin/rollback/commit/disconnect + execute_with_rollback 模板方法 + 装饰器自动注册。PostgreSQL(psycopg2,DDL 事务)、Vastbase(继承 PG,兼容性模式 A/B/PG/MSSQL 切换)、金仓(psycopg2,无 DDL 事务)、MySQL(pymysql,autocommit+utf8mb4)、Oracle(oracledb thin,SID/SERVICE_NAME,PL/SQL,耗时最长)、SQL Server(pymssql) |
 | 认证与安全 | client_registry.py + oauth_routes.py | 1d | API Key 随机生成(mcp-xxx)+Bearer Token 提取+双向映射；客户端 CRUD+Key 轮换；OAuth 2.0 Authorization Code 流程 + DCR 动态注册(RFC 7591)；授权码 10min 过期+一次性使用防重放；全部操作 threading.Lock 线程安全 |
 | MCP 协议 | mcp_routes.py + dify_mcp.py | 1d | JSON-RPC 入口（initialize/tools/list/tools/call/notifications），参数 schema 自动生成；SSE 端点异步推送 endpoint+30s 心跳；Dify 平台专用 execute_sql 接口+OAuth 回调+OAuth 服务发现元数据 |
@@ -157,9 +160,9 @@ DB-MCP 定位为智能答疑平台的数据库 SQL 验证中间层：
 ┌──────────────────────────────────────────────────────────────┐
 │                    FastAPI 路由层 (async)                     │
 │                                                              │
-│  /api/execute_sql  ──→  asyncio.wait_for(timeout=300s)       │
+│  /api/execute_sql  ──→  asyncio.wait_for(timeout=3600s)       │
 │                                │                             │
-│  /mcp (JSON-RPC)    ──→  asyncio.wait_for(timeout=300s)      │
+│  /mcp (JSON-RPC)    ──→  asyncio.wait_for(timeout=3600s)      │
 │                                │                             │
 │                    asyncio.to_thread(executor.execute)        │
 └────────────────────────────────┼─────────────────────────────┘
@@ -251,7 +254,7 @@ DB-MCP 定位为智能答疑平台的数据库 SQL 验证中间层：
    │              │    │                  │    │                 │
    │ async 接收   │───►│ BoundedSemaphore │───►│ PooledDB        │
    │ to_thread    │    │ max=10           │    │ maxconnections  │
-   │ 300s 兜底    │    │ acquire 阻塞30s  │    │ = 10            │
+   │ 3600s 兜底    │    │ acquire 阻塞30s  │    │ = 10            │
    │              │    │ 超时→拒绝        │    │ 线程安全        │
    └──────────────┘    └──────────────────┘    └─────────────────┘
         无限并发              最多10个              池内10个连接
@@ -344,185 +347,64 @@ DB-MCP 定位为智能答疑平台的数据库 SQL 验证中间层：
    优先级最低         优先级中          优先级最高
 ```
 
-## 七、系统设计：Vastbase 多版本可定制构建
+## 七、系统设计：Ephemeral 版本（Nexus 自动构建）
 
-### 7.1 工作流程图
+不在 databases.yaml 中的版本（如 3.0.8.psu0、3.0.8.24875）通过以下流程自动获取：
+
+### 7.1 工作流程
 
 ```
-                        客户端请求
-                            │
-                    api/execute_sql
-                    { db_type: "vastbase",
-                      version: "3.0.8.299958",
-                      tags: ["standard"],      // 或 tags: ["custom"]
-                      db_params: {"work_mem": "4MB"},
-                      mounts: ["/path/to/postgresql.conf:/etc/conf/postgresql.conf"]
-                    }
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────┐
-│                    请求分流 (executor)                        │
-│                                                              │
-│  config.get('tags') 含 "standard"?                           │
-│         │                                                   │
-│    YES  │              NO  (含 "custom" 或 db_params/mounts) │
-│         ▼                                                   │
-│  ┌──────────────────┐     ┌─────────────────────────────┐    │
-│  │  标准池化路径     │     │  定制一次性路径              │    │
-│  │                  │     │                             │    │
-│  │ pool.lease()     │     │ pool.lease_ephemeral()      │    │
-│  │   ├─ 复用容器    │     │   ├─ docker build (if need) │    │
-│  │   ├─ 信号量限流  │     │   ├─ docker run + params    │    │
-│  │   ├─ 连接池借还  │     │   ├─ 单连接直接执行         │    │
-│  │   └─ 容器复用    │     │   └─ docker stop + rm       │    │
-│  └──────────────────┘     └─────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────┘
-
-
-### 7.2 镜像构建流程 (首次请求)
-
-  databases.yaml 配置:
-  ┌────────────────────────────────────────┐
-  │ vastbase:                              │
-  │   versions:                            │
-  │     "3.0.8.299958":                    │
-  │       port: 5432                       │
-  │       adapter: "VastbaseAdapter"       │
-  │       built: false    ◄── 尚未构建      │
-  │       username: "vbmcp"               │
-  │       ...                             │
-  └────────────────────────────────────────┘
-               │
-               ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │              _ensure_image(version, config)                   │
-  │                                                              │
-  │  1. 检查本地镜像 vastbase:3.0.8.299958 是否存在?              │
-  │         │                                                   │
-  │    存在 │                 不存在                              │
-  │         ▼                                                   │
-  │    直接返回              ┌─────────────────────┐             │
-  │                          │  docker build        │             │
-  │                          │  ┌─────────────────┐ │             │
-  │                          │  │ Dockerfile 模板  │ │             │
-  │                          │  │                 │ │             │
-  │                          │  │ ARG VERSION     │ │             │
-  │                          │  │ ARG PORT        │ │             │
-  │                          │  │                 │ │             │
-  │                          │  │ FROM base       │ │             │
-  │                          │  │ RUN install ... │ │             │
-  │                          │  └─────────────────┘ │             │
-  │                          │                       │             │
-  │                          │  build上下文:         │             │
-  │                          │  /images/vastbase/   │             │
-  │                          │    3.0.8.299958/     │             │
-  │                          │    ├─ Dockerfile     │             │
-  │                          │    └─ deps/          │             │
-  │                          │                       │             │
-  │                          │  产物:                │             │
-  │                          │  vastbase:3.0.8.299958              │
-  │                          └─────────────────────┘             │
-  └──────────────────────────────────────────────────────────────┘
-
-
-### 7.3 定制容器执行流程 (lease_ephemeral)
-
-  lease_ephemeral(db_type, version, config)
+客户端请求 version="3.0.8.psu0"
        │
        ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │ 1. _ensure_image(version, config)     // 构建或复用镜像       │
-  └──────────────────────────────┬───────────────────────────────┘
-                                 │
-                                 ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │ 2. _create_ephemeral_container()                             │
-  │                                                              │
-  │    container_name = f"db-mcp-ephemeral-{key}-{random_suffix}" │
-  │                                                              │
-  │    run_kwargs = {                                            │
-  │        image: "vastbase:3.0.8.299958",                       │
-  │        name: container_name,                                 │
-  │        auto_remove: True,    // 兜底: 即使崩溃也自动清理     │
-  │        ...                                                   │
-  │    }                                                         │
-  │                                                              │
-  │    // db_params 注入 (转为环境变量)                           │
-  │    if config.get('db_params'):                               │
-  │        env['OTHER_PG_CONF'] = encode_db_params(db_params)    │
-  │        例: {"work_mem":"2MB","wal_buffers":"16MB"}           │
-  │             → "work_mem=2MB\\nwal_buffers=16MB"              │
-  │                                                              │
-  │    // mounts 注入 (转为 docker volumes)                      │
-  │    if config.get('mounts'):                                  │
-  │        run_kwargs['volumes'] = config['mounts']              │
-  │        例: ["/path/to/postgresql.conf:/etc/vb/postgresql.conf"]│
-  │                                                              │
-  │    // tags: label 注入                                       │
-  │    run_kwargs['labels'] = {'db-mcp-tags': ','.join(tags)}    │
-  │                                                              │
-  │    container = docker.containers.run(**run_kwargs)           │
-  └──────────────────────────────┬───────────────────────────────┘
-                                 │
-                                 ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │ 3. _wait_for_db_ready(host, port)  // 数据库连接验证          │
-  └──────────────────────────────┬───────────────────────────────┘
-                                 │
-                                 ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │ 4. 直接连接执行 (不走连接池)                                  │
-  │                                                              │
-  │    conn = psycopg2.connect(host, port, user, password, db)    │
-  │    adapter.use_connection(conn)                               │
-  │    result = adapter.execute(sql)                              │
-  │    adapter.disconnect()                                       │
-  └──────────────────────────────┬───────────────────────────────┘
-                                 │
-                                 ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │ 5. 销毁容器 (ContainerLease.__exit__)                        │
-  │                                                              │
-  │    docker.stop(container_name)                               │
-  │    docker.rm(container_name)                                 │
-  │                                                              │
-  │    (auto_remove=True 兜底: 即使上述失败, daemon 也会清理)     │
-  └──────────────────────────────────────────────────────────────┘
-
-
-### 7.4 标准 vs 定制路径对比
-
-  ┌─────────────────────────────────────────────────────────────────┐
-  │                        标准路径                │    定制路径     │
-  ├─────────────────────────────────────────────────────────────────┤
-  │  容器命名    db-mcp-vastbase-3.0.8.299958      │  加随机后缀     │
-  │  容器复用    复用, 请求间共享                   │  用完即毁       │
-  │  并发控制    BoundedSemaphore(10)              │  无限制         │
-  │  连接池      PooledDB(max=10)                  │  单连接直连     │
-  │  事务回滚    支持                               │  支持           │
-  │  健康监控    30s 检测, 3 次失败→标记不健康      │  无             │
-  │  空闲回收    5min TTL                          │  无 (立刻销毁)  │
-  │  资源限制    cpu + memory 限制                  │  默认值         │
-  │  镜像来源    预置 image 字段                    │  docker build   │
-  │  参数注入    不支持                             │  db_params +    │
-  │                                                │  mounts         │
-  └─────────────────────────────────────────────────────────────────┘
-
-
-### 7.5 镜像缓存与清理
-
-  请求 version=3.0.8.299958
+ConfigManager.get_db_config("vastbase", "3.0.8.psu0")
+       │
+       ├─ 在 versions 中精确匹配? → 否
+       │
+       └─ _get_ephemeral_config()
+              │
+              ├─ 检查 nexus 配置? → 有
+              ├─ 检查 defaults 配置? → 有
+              └─ 返回 config with needs_binary_prep=True
        │
        ▼
-  ┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
-  │ 检查本地镜像  │─No─►│ docker build │────►│ 缓存到本地        │
-  │              │     │ (分钟级)     │     │ vastbase:3.0.8... │
-  └──────┬───────┘     └──────────────┘     └──────────────────┘
-         │ Yes
-         ▼
-   直接使用缓存 (秒级)
+Executor.execute()
+       │
+       ├─ config.get('needs_binary_prep')? → True
+       │
+       └─ PackageManager.prepare_binaries()
+              │
+              ├─ 检查本地缓存 (data/packages/)
+              │   └─ 有 → 直接使用 (跳过下载)
+              │
+              └─ 无 → 从 Nexus 下载
+                     │
+                     ├─ NexusClient.fetch_package()
+                     │   ├─ 3.0.8 → search_artifact (精确版本匹配)
+                     │   ├─ 3.0.8.psu0 → 目录列表 + 正则匹配
+                     │   └─ 3.0.8.24875 → 关键字搜索
+                     │
+                     └─ 三层解包
+                         ├─ tar -xf outer.tar.gz
+                         ├─ tar -xf vastbase-installer/*.tar.gz
+                         └─ tar -xf *.tar.bz2 → cache_path
+       │
+       └─ 挂载 binary 到容器 /home/vastbase/vastbase
+              │
+              └─ ContainerPool.lease() with volumes mount
+```
 
-  清理策略:
-  - 定制容器用完即 docker rm (auto_remove=True 兜底)
-  - 孤儿镜像 (无容器引用 + 超过 N 天未使用) → 定时清理
-  - docker image prune --filter "label=db-mcp"
+### 7.2 版本格式支持
+
+| 格式 | 示例 | Nexus 搜索策略 |
+|------|------|---------------|
+| 基础版本 | `3.0.8` | 在 releases 仓库精确匹配 version 字段 |
+| PSU 补丁 | `3.0.8.psu0` | 目录列表 + file_pattern 正则匹配 |
+| Build 号 | `3.0.8.24875` | 全局 keyword 搜索文件名前缀 |
+
+### 7.3 缓存策略
+
+- 二进制包缓存到 `data/packages/{db_type}-{version}/`
+- 下次请求相同版本直接使用缓存（跳过 Nexus 下载和解压）
+- 容器基于 defaults.base_image 创建，二进制目录 volume 挂载
+- 容器空闲超过 `MCP_CONTAINER_IDLE_TTL`（默认 24 小时）后在午夜清理

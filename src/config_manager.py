@@ -2,7 +2,7 @@ import yaml
 import os
 import threading
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ class VersionConfig(BaseModel):
     privileged: bool = Field(default=False, description="是否特权容器")
     prewarm: bool = Field(default=False, description="是否在启动时预热容器")
     env: Optional[Dict[str, str]] = Field(default=None, description="环境变量")
+    command: Optional[str] = Field(default=None, description="容器启动命令参数")
 
 
 class DBTypeConfig(BaseModel):
@@ -88,7 +89,8 @@ class ConfigManager:
 
         canonical_version = cls._find_version(db_config['versions'], version)
         if not canonical_version:
-            return None
+            return cls._get_ephemeral_config(canonical_type, db_config, version)
+
         version_config = db_config['versions'][canonical_version]
 
         return {
@@ -102,6 +104,41 @@ class ConfigManager:
             'privileged': version_config.get('privileged', False),
             'prewarm': version_config.get('prewarm', False),
             'command': version_config.get('command'),
+            'ephemeral': False,
+        }
+
+    @classmethod
+    def _get_ephemeral_config(cls, canonical_type: str, db_config: dict,
+                               version: str) -> Optional[Dict[str, Any]]:
+        """Return a synthetic config for versions not in databases.yaml.
+
+        Only works for db_types that have nexus credentials configured.
+        Falls back to the ``defaults`` section of the db_type config.
+        """
+        nexus = db_config.get('nexus', {})
+        if not nexus:
+            return None
+
+        defaults = db_config.get('defaults', {})
+        if not defaults:
+            return None
+
+        logger.info(f"Version {version} not in config for {canonical_type}, "
+                     "using ephemeral (auto-build via Nexus)")
+
+        return {
+            'image': defaults.get('base_image'),
+            'port': defaults.get('port', 5432),
+            'adapter': defaults.get('adapter', ''),
+            'username': defaults.get('username', ''),
+            'password': defaults.get('password', ''),
+            'database': defaults.get('database', 'postgres'),
+            'env': defaults.get('env'),
+            'privileged': defaults.get('privileged', True),
+            'prewarm': False,
+            'command': defaults.get('command'),
+            'ephemeral': True,
+            'needs_binary_prep': True,
         }
 
     @classmethod
@@ -123,3 +160,23 @@ class ConfigManager:
             return []
 
         return list(db_config['versions'].keys())
+
+    @classmethod
+    def get_nexus_config(cls, db_type: str) -> Optional[Dict[str, str]]:
+        """Return nexus credentials for a db_type, or None."""
+        if 'databases' not in cls._config:
+            return None
+        canonical_type = cls._find_db_type(db_type)
+        if not canonical_type:
+            return None
+        db_cfg = cls._config['databases'][canonical_type]
+        nexus = db_cfg.get('nexus', {})
+        if not nexus:
+            return None
+        return {
+            'domain': nexus.get('domain', ''),
+            'username': nexus.get('username', ''),
+            'password': nexus.get('password', ''),
+            'repository': nexus.get('repository', ''),
+            'package': nexus.get('package', {}),
+        }
