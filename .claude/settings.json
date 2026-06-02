@@ -13,7 +13,9 @@
       "Read(//d/Program Files/Python/Python311/Lib/site-packages/docker/types/**)",
       "Read(//d/Program Files/Python/Python311/Lib/site-packages/docker/**)",
       "Bash(mkdir -p \"d:\\\\work\\\\workspace\\\\workspacepri\\\\poly-db-mcp\\\\.claude\\\\skills\")",
-      "Bash(mkdir -p \"d:/work/workspace/workspacepri/poly-db-mcp/.claude/skills\")"
+      "Bash(mkdir -p \"d:/work/workspace/workspacepri/poly-db-mcp/.claude/skills\")",
+      "WebFetch(domain:container-registry.oracle.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "additionalDirectories": [
       "d:\\work\\workspace\\workspacepri\\poly-db-mcp\\.claude"

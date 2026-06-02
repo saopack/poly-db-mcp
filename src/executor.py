@@ -84,15 +84,17 @@ def _is_plsql_block(query: str) -> bool:
 
 
 def _split_sql_statements(query: str) -> List[str]:
-    """Split SQL string into individual statements.
+    """Split SQL string into individual statements, stripping comments.
 
     Handles semicolons inside:
     - Single-quoted string literals (including E'...' escape strings)
     - Double-quoted identifiers
     - Dollar-quoted strings (PostgreSQL): $$...$$ or $tag$...$tag$
     - Backtick-quoted identifiers (MySQL): `...`
-    - Single-line comments (--)
-    - Block comments (/* */)
+
+    Strips:
+    - Single-line comments: -- ... (all DBs) and # ... (MySQL)
+    - Block comments: /* ... */ (all DBs)
 
     PL/SQL blocks (DECLARE/BEGIN...END, CREATE FUNCTION/PROCEDURE/...)
     are returned as a single statement — semicolons inside them are preserved.
@@ -110,32 +112,33 @@ def _split_sql_statements(query: str) -> List[str]:
     _BEGIN_RE = re.compile(
         r'\bBEGIN\b(?!\s+(?:TRANSACTION|WORK)\b)', re.IGNORECASE
     )
-    _END_RE = re.compile(r'\bEND\b(\s+\w+)?\s*;', re.IGNORECASE)
+    _END_RE = re.compile(
+        r'\bEND\b(?!\s+(?:LOOP|IF|CASE)\b)(\s+\w+)?\s*;', re.IGNORECASE
+    )
 
     while i < n:
         ch = query[i]
 
         # Single-line comment: -- ... until end of line
         if ch == '-' and i + 1 < n and query[i + 1] == '-':
-            current.append(ch)
-            current.append(query[i + 1])
             i += 2
             while i < n and query[i] != '\n':
-                current.append(query[i])
+                i += 1
+            continue
+
+        # MySQL single-line comment: # ... until end of line
+        if ch == '#':
+            i += 1
+            while i < n and query[i] != '\n':
                 i += 1
             continue
 
         # Block comment: /* ... */
         if ch == '/' and i + 1 < n and query[i + 1] == '*':
-            current.append(ch)
-            current.append(query[i + 1])
             i += 2
             while i + 1 < n and not (query[i] == '*' and query[i + 1] == '/'):
-                current.append(query[i])
                 i += 1
             if i + 1 < n:
-                current.append(query[i])
-                current.append(query[i + 1])
                 i += 2
             continue
 
@@ -607,9 +610,11 @@ class MCPExecutor:
         pg_hba_conf: Optional[str] = None,
         extra_files: Optional[list] = None,
     ) -> Dict[str, Any]:
-        # 统一小写，ConfigManager 内部做大小写不敏感匹配
+        # 统一小写和去 v 前缀，ConfigManager 内部做大小写不敏感匹配
         db_type = db_type.lower()
         version = version.lower()
+        if version.startswith('v'):
+            version = version[1:]
 
         if explain and not query.strip().upper().startswith("EXPLAIN"):
             query = f"EXPLAIN {query}"

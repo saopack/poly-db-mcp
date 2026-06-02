@@ -82,14 +82,17 @@ class ConfigManager:
         if 'databases' not in cls._config:
             return None
 
+        # Strip leading 'v' / 'V' prefix (e.g. "v3.0.8" → "3.0.8")
+        clean_version = version[1:] if version.lower().startswith('v') else version
+
         canonical_type = cls._find_db_type(db_type)
         if not canonical_type:
             return None
         db_config = cls._config['databases'][canonical_type]
 
-        canonical_version = cls._find_version(db_config['versions'], version)
+        canonical_version = cls._find_version(db_config['versions'], clean_version)
         if not canonical_version:
-            return cls._get_ephemeral_config(canonical_type, db_config, version)
+            return cls._get_ephemeral_config(canonical_type, db_config, clean_version)
 
         version_config = db_config['versions'][canonical_version]
 

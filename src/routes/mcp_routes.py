@@ -5,7 +5,7 @@ import asyncio
 import logging
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..dependencies import get_mcp_handler
 
@@ -67,7 +67,7 @@ def _handle_mcp_jsonrpc(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         arguments = params.get("arguments", {})
         result = get_mcp_handler().call_tool(tool_name, arguments)
         if result.status == "success":
-            content_text = json.dumps(result.content, ensure_ascii=False) if isinstance(result.content, dict) else str(result.content)
+            content_text = json.dumps(result.content, ensure_ascii=False, default=str) if isinstance(result.content, dict) else str(result.content)
         else:
             content_text = result.error.message if result.error else "Unknown error"
         return {
@@ -158,8 +158,8 @@ async def mcp_sse():
             except asyncio.CancelledError:
                 break
 
-    return Response(
-        content=event_stream(),
+    return StreamingResponse(
+        event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
     )

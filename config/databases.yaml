@@ -155,17 +155,17 @@ databases:
         env:
           ORACLE_PASSWORD: "oracle"
 
-      "19c":
-        image: "registry.cn-hangzhou.aliyuncs.com/zhuyijun/oracle:19c"
-        port: 1521
-        adapter: "OracleAdapter"
-        username: "system"
-        password: "Oracle@123"
-        database: "ORCLPDB"
-        env:
-          ORACLE_SID: "ORCLCDB"
-          ORACLE_PDB: "ORCLPDB"
-          ORACLE_PWD: "Oracle@123"
+      # "19c":
+      #   image: "registry.cn-hangzhou.aliyuncs.com/zhuyijun/oracle:19c"
+      #   port: 1521
+      #   adapter: "OracleAdapter"
+      #   username: "system"
+      #   password: "Oracle@123"
+      #   database: "ORCLPDB"
+      #   env:
+      #     ORACLE_SID: "ORCLCDB"
+      #     ORACLE_PDB: "ORCLPDB"
+      #     ORACLE_PWD: "Oracle@123"
       "21c":
         image: "gvenzl/oracle-xe:21-slim"
         port: 1521

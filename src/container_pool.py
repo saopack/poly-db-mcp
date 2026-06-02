@@ -95,18 +95,20 @@ def _make_container_key(db_type: str, version: str, compat_mode: str = "") -> st
 
 
 # ---------------------------------------------------------------------------
-# Per-database resource limits (official minimum requirements)
+# Per-database resource limits (hard caps with headroom above official minimums)
 # Each entry: {"cpu": <cores>, "memory": "<docker mem_limit string>"}
+# Memory is set above official minimums to avoid OOM during normal operation.
+# If a specific version needs more, override via YAML resources or env vars.
 # ---------------------------------------------------------------------------
 
 _DEFAULT_RESOURCE_LIMITS = {
-    # "postgresql": {"cpu": 1, "memory": "512m"},
-    # "vastbase":   {"cpu": 1, "memory": "1g"},
-    # "kingbase":   {"cpu": 2, "memory": "2g"},
-    # "mysql":      {"cpu": 1, "memory": "512m"},
-    # "oracle":     {"cpu": 1, "memory": "1g"},
-    # "sqlserver":  {"cpu": 2, "memory": "2g"},
-    # "mssql":      {"cpu": 2, "memory": "2g"},
+    "postgresql": {"cpu": 1, "memory": "2g"},
+    "vastbase":   {"cpu": 2, "memory": "4g"},
+    "kingbase":   {"cpu": 2, "memory": "6g"},
+    "mysql":      {"cpu": 1, "memory": "2g"},
+    "oracle":     {"cpu": 2, "memory": "6g"},
+    "sqlserver":  {"cpu": 2, "memory": "4g"},
+    "mssql":      {"cpu": 2, "memory": "4g"},
 }
 
 
@@ -297,11 +299,17 @@ class ContainerPool:
                 break
             time.sleep(0.5)
         with self._pool_lock:
-            for entry in list(self._entries.values()):
-                self._destroy_entry(entry, reason="shutdown")
+            for entry in self._entries.values():
+                if entry.connection_pool:
+                    try:
+                        entry.connection_pool.close()
+                    except Exception as e:
+                        logger.warning(f"Error closing connection pool: {e}")
+                    entry.connection_pool = None
+                entry.state = ContainerState.STOPPED
             self._entries.clear()
             self._create_locks.clear()
-        logger.info("ContainerPool: shutdown complete")
+        logger.info("ContainerPool: shutdown complete (containers preserved)")
 
     def prewarm(self):
         from .config_manager import ConfigManager
@@ -503,11 +511,11 @@ class ContainerPool:
         # Apply resource limits (CPU / memory)
         if db_type:
             limits = _resolve_resource_limits(db_type, config)
-            # run_kwargs['mem_limit'] = limits['memory']
-            # run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
+            run_kwargs['mem_limit'] = limits['memory']
+            run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
             logger.info(
                 f"ContainerPool: {container_name} resource limits: "
-                f"cpu={limits['cpu']}, memory={limits['memory']} (disabled)"
+                f"cpu={limits['cpu']}, memory={limits['memory']}"
             )
 
         env = config.get('env')
@@ -676,20 +684,21 @@ class ContainerPool:
                         if key in self._entries:
                             entry.health_failures = 0
 
-            # Midnight cleanup: remove containers not used today
+            # Midnight cleanup: remove containers idle longer than idle_ttl
             today = date.today().isoformat()
             if self._last_cleanup_date != today:
                 self._last_cleanup_date = today
+                now = time.time()
                 with self._pool_lock:
                     for key, entry in list(self._entries.items()):
                         if (entry.state == ContainerState.HEALTHY
                                 and entry.active_leases == 0
                                 and not entry.exclusive):
-                            last_used_date = date.fromtimestamp(entry.last_used).isoformat()
-                            if last_used_date != today:
+                            idle_seconds = now - entry.last_used
+                            if idle_seconds > entry.idle_ttl:
                                 logger.info(
                                     f"ContainerPool: midnight cleanup removing container {key} "
-                                    f"(last used: {last_used_date})"
+                                    f"(idle for {idle_seconds:.0f}s, ttl={entry.idle_ttl}s)"
                                 )
                                 self._destroy_entry(entry, reason="midnight cleanup")
                                 del self._entries[key]
@@ -824,11 +833,11 @@ class ContainerPool:
         # Apply resource limits (CPU / memory)
         if db_type:
             limits = _resolve_resource_limits(db_type, config)
-            # run_kwargs['mem_limit'] = limits['memory']
-            # run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
+            run_kwargs['mem_limit'] = limits['memory']
+            run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
             logger.info(
                 f"ContainerPool: {container_name} resource limits: "
-                f"cpu={limits['cpu']}, memory={limits['memory']} (disabled)"
+                f"cpu={limits['cpu']}, memory={limits['memory']}"
             )
 
         env = config.get('env')

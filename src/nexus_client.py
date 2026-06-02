@@ -32,7 +32,10 @@ class NexusClient:
         type ('basic'|'psu'|'build'), major, minor, build,
         and optionally psu / build_number.
         """
-        parts = version.split('.')
+        clean = version
+        if clean.lower().startswith('v'):
+            clean = clean[1:]
+        parts = clean.split('.')
         result = {
             'raw': version,
             'major': parts[0] if len(parts) > 0 else '0',

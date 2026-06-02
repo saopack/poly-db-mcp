@@ -1,4 +1,7 @@
+import json
 from abc import ABC, abstractmethod
+from datetime import datetime, date, time, timedelta
+from decimal import Decimal
 from typing import Dict, Any, Optional, Type
 from ..exceptions import AdapterExecutionError
 
@@ -92,7 +95,16 @@ class DBAdapter(ABC):
         for row in rows:
             row_dict = {}
             for i, col in enumerate(columns):
-                row_dict[col] = row[i]
+                val = row[i]
+                if isinstance(val, datetime):
+                    val = val.isoformat()
+                elif isinstance(val, (date, time, timedelta)):
+                    val = str(val)
+                elif isinstance(val, Decimal):
+                    val = float(val)
+                elif isinstance(val, bytes):
+                    val = val.decode('utf-8', errors='replace')
+                row_dict[col] = val
             result.append(row_dict)
         return result
 
