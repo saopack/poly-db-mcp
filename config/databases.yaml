@@ -1,9 +1,9 @@
 databases:
   vastbase:
     nexus:
-      domain: "http://ip:port"
-      username: "username"
-      password: "password"
+      domain: "http://172.16.107.3:8081"
+      username: "package"
+      password: "6uVXs5P3N9RgaBMR"
       repository: "vastbase-software"
       package:
         psu:
@@ -24,38 +24,41 @@ databases:
         VB_PASSWORD: "Vastbase@123"
         USER_PRIVILEGE: "sysadmin"
     versions:
-      "3.0.8":
-        image: "vastbase-g100-single-v1.4-3.0.8.29407-linux-x86_64:20260513111853"
+      "3.0.9":
+        psu: "01"
         port: 5432
         adapter: "VastbaseAdapter"
         username: "vbmcp"
         password: "Vastbase@123"
         database: "postgres"
         privileged: true
+        prewarm: true
         env:
           VB_USERNAME: "vbmcp"
           VB_PASSWORD: "Vastbase@123"
           USER_PRIVILEGE: "sysadmin"
-      "3.0.9":
-        image: "vastbase-g100-single-v1.4-3.0.8.29407-linux-x86_64:20260513111853"
+      "3.0.8":
+        psu: "4"
         port: 5432
         adapter: "VastbaseAdapter"
         username: "vbmcp"
         password: "Vastbase@123"
         database: "postgres"
         privileged: true
+        prewarm: true
         env:
           VB_USERNAME: "vbmcp"
           VB_PASSWORD: "Vastbase@123"
           USER_PRIVILEGE: "sysadmin"
       "2.2.15":
-        image: "vastbase-g100-single-v1.4-2.2.15.31056-linux-x86_64:20260518104321"
+        psu: "11"
         port: 5432
         adapter: "VastbaseAdapter"
         username: "vbmcp"
         password: "Vastbase@123"
         database: "postgres"
         privileged: true
+        prewarm: true
         env:
           VB_USERNAME: "vbmcp"
           VB_PASSWORD: "Vastbase@123"

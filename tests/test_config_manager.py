@@ -31,5 +31,6 @@ class TestConfigManager:
     def test_get_db_versions(self):
         ConfigManager.load_config()
         versions = ConfigManager.get_db_versions('vastbase')
-        assert '3.0.8.29407' in versions
-        assert '3.0.9.31338' in versions
+        assert '3.0.9' in versions
+        assert '3.0.8' in versions
+        assert '2.2.15' in versions

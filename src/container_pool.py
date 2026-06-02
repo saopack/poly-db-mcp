@@ -431,6 +431,10 @@ class ContainerPool:
         logger.info(f"ContainerPool: starting container {container_name} with custom config")
 
         try:
+            # Download and volume-mount binary from Nexus for PSU / ephemeral versions
+            if config.get('needs_binary_prep'):
+                config = self._prepare_binaries(config, db_type)
+
             self._pull_image_if_not_exists(config['image'])
             container_id, host_port = self._create_ephemeral_container(
                 container_name, config, db_type, ephemeral_kwargs
@@ -526,7 +530,13 @@ class ContainerPool:
             if ephemeral_kwargs.get('params'):
                 if env is None:
                     env = {}
-                env['OTHER_PG_CONF'] = ephemeral_kwargs['params']
+                guc_params = ephemeral_kwargs['params']
+                env['OTHER_PG_CONF'] = guc_params
+                logger.info(
+                    "ContainerPool: %s GUC parameters:\n%s",
+                    container_name,
+                    guc_params.strip(),
+                )
 
             temp_dirs = []
             volumes = {}
@@ -549,7 +559,15 @@ class ContainerPool:
                         'bind': f'/docker-entrypoint-initdb.d/{conf_filename}',
                         'mode': 'ro',
                     }
-                    logger.info(f"ContainerPool: mounted {conf_filename} for {container_name}")
+                    _lines = decoded.strip().split('\n')
+                    _preview = '\n'.join(_lines[:20])
+                    _more = f" ... (+{len(_lines) - 20} more lines)" if len(_lines) > 20 else ""
+                    logger.info(
+                        "ContainerPool: %s %s (%d lines, %d bytes):\n%s%s",
+                        container_name, conf_filename,
+                        len(_lines), len(decoded),
+                        _preview, _more,
+                    )
 
             # Mount extra files to /docker-entrypoint-initdb.d/
             extra_files = ephemeral_kwargs.get('extra_files') if ephemeral_kwargs else None
@@ -570,7 +588,10 @@ class ContainerPool:
                         'bind': f'/docker-entrypoint-initdb.d/{file_name}',
                         'mode': 'ro',
                     }
-                    logger.info(f"ContainerPool: mounted extra file {file_name} for {container_name}")
+                    logger.info(
+                        "ContainerPool: %s extra file %s (%d bytes)",
+                        container_name, file_name, len(decoded),
+                    )
 
             if volumes:
                 run_kwargs['volumes'] = volumes
@@ -587,6 +608,12 @@ class ContainerPool:
 
         if config.get('command'):
             run_kwargs['command'] = config['command']
+
+        logger.info(
+            "ContainerPool: starting ephemeral container %s:\n    %s",
+            container_name,
+            self._format_docker_run_command(run_kwargs),
+        )
 
         container = self.docker_client.containers.run(**run_kwargs)
         container.reload()
@@ -744,10 +771,51 @@ class ContainerPool:
                 self._create_locks[key] = threading.Lock()
             return self._create_locks[key]
 
+    def _prepare_binaries(self, config: dict, db_type: str) -> dict:
+        """Download DB binary from Nexus and add a volume mount to *config*.
+
+        Returns a shallow copy of *config* with ``volumes`` updated so the
+        original dict is not mutated.
+        """
+        from .config_manager import ConfigManager
+        from .package_manager import PackageManager
+
+        nexus_config = ConfigManager.get_nexus_config(db_type)
+        if not nexus_config:
+            raise RuntimeError(
+                f"{db_type}: needs_binary_prep set but no nexus config found"
+            )
+
+        nexus_version = config.get('nexus_version', '')
+        if not nexus_version:
+            raise RuntimeError(
+                f"{db_type}: needs_binary_prep set but no nexus_version in config"
+            )
+
+        package_mgr = PackageManager()
+        binary_path = package_mgr.prepare_binaries(
+            db_type, nexus_version, nexus_config,
+        )
+
+        config = dict(config)
+        volumes = dict(config.get('volumes', {}))
+        volumes[binary_path] = {'bind': '/home/vastbase/vastbase', 'mode': 'rw'}
+        config['volumes'] = volumes
+
+        logger.info(
+            "ContainerPool: mounted Nexus binary %s → /home/vastbase/vastbase "
+            "(%s %s)", binary_path, db_type, nexus_version,
+        )
+        return config
+
     def _start_entry(self, entry: ContainerEntry, config: dict, db_type: str):
         entry.state = ContainerState.STARTING
 
         try:
+            # Download and volume-mount binary from Nexus for PSU / ephemeral versions
+            if config.get('needs_binary_prep'):
+                config = self._prepare_binaries(config, db_type)
+
             self._pull_image_if_not_exists(config['image'])
             container_id, host_port = self._get_or_create_container(
                 entry.container_name, config, db_type
@@ -784,6 +852,7 @@ class ContainerPool:
     def _get_or_create_container(self, container_name: str, config: dict,
                                   db_type: str = "") -> Tuple[str, int]:
         port = config['port']
+        is_ephemeral = config.get('needs_binary_prep', False)
 
         try:
             existing = self.docker_client.containers.get(container_name)
@@ -794,27 +863,117 @@ class ContainerPool:
             if existing.status == 'running':
                 try:
                     host_port = self._get_host_port(existing, port)
-                    logger.info(f"ContainerPool: reusing running container {container_name} on port {host_port}")
+                    logger.info(
+                        "ContainerPool: reusing running container %s on port %s",
+                        container_name, host_port,
+                    )
                     return existing.id, host_port
                 except Exception:
-                    logger.warning(f"Container {container_name} has no port mapping, removing...")
+                    logger.warning(
+                        "Container %s has no port mapping, removing...",
+                        container_name,
+                    )
                     self._remove_container(container_name)
             elif existing.status in ('exited', 'stopped', 'created'):
-                logger.info(f"Container {container_name} exists but is {existing.status}, starting...")
-                try:
-                    existing.start()
-                    existing.reload()
-                    host_port = self._get_host_port(existing, port)
-                    logger.info(f"Container {container_name} restarted on port {host_port}")
-                    return existing.id, host_port
-                except Exception as e:
-                    logger.warning(f"Failed to start existing container {container_name}: {e}, removing...")
+                # Ephemeral containers must be recreated to ensure binary
+                # mounts are applied correctly on restart.
+                if is_ephemeral:
+                    logger.info(
+                        "Container %s exists (%s) but needs_binary_prep, removing "
+                        "and recreating to ensure volume mounts",
+                        container_name, existing.status,
+                    )
                     self._remove_container(container_name)
+                else:
+                    logger.info(
+                        "Container %s exists but is %s, restarting...",
+                        container_name, existing.status,
+                    )
+                    try:
+                        existing.start()
+                        existing.reload()
+                        host_port = self._get_host_port(existing, port)
+                        logger.info(
+                            "Container %s restarted on port %s",
+                            container_name, host_port,
+                        )
+                        return existing.id, host_port
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to restart container %s: %s, removing...",
+                            container_name, e,
+                        )
+                        self._remove_container(container_name)
             else:
-                logger.warning(f"Container {container_name} in unexpected status {existing.status}, removing...")
+                logger.warning(
+                    "Container %s in unexpected status %s, removing...",
+                    container_name, existing.status,
+                )
                 self._remove_container(container_name)
 
         return self._create_and_start(container_name, config, db_type)
+
+    @staticmethod
+    def _format_docker_run_command(run_kwargs: dict) -> str:
+        """Build a human-readable ``docker run`` command string from run_kwargs."""
+        parts = ["docker run"]
+
+        if run_kwargs.get('detach'):
+            parts.append("-d")
+
+        name = run_kwargs.get('name')
+        if name:
+            parts.append(f"--name {name}")
+
+        if run_kwargs.get('privileged'):
+            parts.append("--privileged")
+
+        mem = run_kwargs.get('mem_limit')
+        if mem:
+            parts.append(f"--memory {mem}")
+
+        nano = run_kwargs.get('nano_cpus')
+        if nano:
+            cpu = nano / 1e9
+            if cpu == int(cpu):
+                parts.append(f"--cpus {int(cpu)}")
+            else:
+                parts.append(f"--cpus {cpu}")
+
+        env = run_kwargs.get('environment')
+        if env:
+            for k, v in sorted(env.items()):
+                parts.append(f"-e {k}={v}")
+
+        volumes = run_kwargs.get('volumes')
+        if volumes:
+            for host_path, vol_cfg in sorted(volumes.items()):
+                bind = vol_cfg.get('bind', host_path)
+                mode = vol_cfg.get('mode', '')
+                flag = f"-v {host_path}:{bind}"
+                if mode:
+                    flag += f":{mode}"
+                parts.append(flag)
+
+        ports = run_kwargs.get('ports')
+        if ports:
+            for container_port in sorted(ports.keys()):
+                host_binding = ports[container_port]
+                port_num = container_port.replace('/tcp', '')
+                if host_binding is None:
+                    parts.append(f"-p {port_num}")
+                elif isinstance(host_binding, int):
+                    parts.append(f"-p {host_binding}:{port_num}")
+                elif isinstance(host_binding, (list, tuple)) and host_binding:
+                    parts.append(f"-p {host_binding[0]}:{port_num}")
+
+        parts.append(run_kwargs.get('image', ''))
+
+        command = run_kwargs.get('command')
+        if command:
+            parts.append(command)
+
+        return " \\\n    ".join(parts)
 
     def _create_and_start(self, container_name: str, config: dict,
                            db_type: str = "") -> Tuple[str, int]:
@@ -835,10 +994,6 @@ class ContainerPool:
             limits = _resolve_resource_limits(db_type, config)
             run_kwargs['mem_limit'] = limits['memory']
             run_kwargs['nano_cpus'] = int(limits['cpu'] * 1e9)
-            logger.info(
-                f"ContainerPool: {container_name} resource limits: "
-                f"cpu={limits['cpu']}, memory={limits['memory']}"
-            )
 
         env = config.get('env')
         if env:
@@ -850,10 +1005,12 @@ class ContainerPool:
         volumes = config.get('volumes')
         if volumes:
             run_kwargs['volumes'] = volumes
-            logger.info(
-                f"ContainerPool: {container_name} mounting volumes: "
-                f"{list(volumes.keys())}"
-            )
+
+        logger.info(
+            "ContainerPool: starting container %s:\n    %s",
+            container_name,
+            self._format_docker_run_command(run_kwargs),
+        )
 
         try:
             container = self.docker_client.containers.run(**run_kwargs)

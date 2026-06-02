@@ -3,14 +3,14 @@ import os
 import threading
 import logging
 from typing import Dict, Any, Optional
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
 
 class VersionConfig(BaseModel):
     """单个数据库版本的配置校验模型"""
-    image: str = Field(..., min_length=1, description="Docker镜像名")
+    image: str = Field(default="", description="Docker镜像名（psu模式下可为空，使用defaults.base_image）")
     port: int = Field(..., gt=0, le=65535, description="数据库端口")
     adapter: str = Field(..., min_length=1, description="适配器类名")
     username: str = Field(default="", description="数据库用户名")
@@ -20,6 +20,13 @@ class VersionConfig(BaseModel):
     prewarm: bool = Field(default=False, description="是否在启动时预热容器")
     env: Optional[Dict[str, str]] = Field(default=None, description="环境变量")
     command: Optional[str] = Field(default=None, description="容器启动命令参数")
+    psu: Optional[str] = Field(default=None, description="PSU补丁编号（如'01'、'4'、'11'），设置后从Nexus拉取二进制")
+
+    @model_validator(mode='after')
+    def check_image_or_psu(self):
+        if not self.image and not self.psu:
+            raise ValueError("必须提供 image 或 psu 字段之一")
+        return self
 
 
 class DBTypeConfig(BaseModel):
@@ -96,8 +103,7 @@ class ConfigManager:
 
         version_config = db_config['versions'][canonical_version]
 
-        return {
-            'image': version_config['image'],
+        result = {
             'port': version_config['port'],
             'adapter': version_config['adapter'],
             'username': version_config.get('username', ''),
@@ -109,6 +115,25 @@ class ConfigManager:
             'command': version_config.get('command'),
             'ephemeral': False,
         }
+
+        psu = version_config.get('psu')
+        if psu:
+            defaults = db_config.get('defaults', {})
+            if not defaults:
+                return None
+            nexus_version = f"{clean_version}.psu{psu}"
+            logger.info(
+                "Version %s (psu=%s) configured for Nexus download → %s",
+                canonical_version, psu, nexus_version,
+            )
+            result['image'] = defaults.get('base_image', '')
+            result['ephemeral'] = True
+            result['needs_binary_prep'] = True
+            result['nexus_version'] = nexus_version
+        else:
+            result['image'] = version_config['image']
+
+        return result
 
     @classmethod
     def _get_ephemeral_config(cls, canonical_type: str, db_config: dict,

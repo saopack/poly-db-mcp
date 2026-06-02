@@ -663,30 +663,6 @@ class MCPExecutor:
         adapter = AdapterClass(config)
         destroy_container = False
 
-        # Binary prep for versions not in databases.yaml: download + extract
-        # from Nexus, then volume-mount into a base-image container that stays
-        # in the pool for reuse. Cleaned up at midnight if unused that day.
-        if config.get('needs_binary_prep'):
-            nexus_config = ConfigManager.get_nexus_config(db_type)
-            if not nexus_config:
-                return {
-                    "status": "error",
-                    "message": f"No nexus config for {db_type}, cannot prepare binaries"
-                }
-            from .package_manager import PackageManager
-            package_mgr = PackageManager()
-            try:
-                binary_path = package_mgr.prepare_binaries(
-                    db_type, version, nexus_config
-                )
-            except Exception as e:
-                logger.error(f"Failed to prepare binaries for {db_type} {version}: {e}")
-                return {"status": "error", "message": str(e)}
-            config = dict(config)
-            config['volumes'] = {
-                binary_path: {'bind': '/home/vastbase/vastbase', 'mode': 'rw'}
-            }
-
         # One-shot containers with custom params/config files.
         # These containers stay in the pool and are cleaned up at midnight
         # if unused that day.
