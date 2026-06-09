@@ -1,0 +1,52 @@
+# routing.yaml — Gateway route configuration
+#
+# Multiple Nodes can declare the same (db_type, version) combination.
+# The Gateway tries them in declaration order — first is primary,
+# subsequent are failover targets (automatically tried when the primary
+# is unreachable).
+#
+# Node names are informational; only `address` and `databases` matter.
+
+gateway:
+  host: "0.0.0.0"
+  port: 8001
+  request_timeout: 3600
+  retry_on_node_error: true
+
+nodes:
+  # Primary for PostgreSQL / Vastbase / Kingbase
+  node-pg:
+    address: "172.16.105.102:8000"
+    databases:
+      - db_type: postgresql
+        versions: [12, 13, 14]
+      - db_type: vastbase
+        versions: ["3.0.8", "3.0.9", "2.2.15"]
+      - db_type: kingbase
+        versions: [V8, V9]
+
+  # Failover replica for the same database types
+  # Uncomment and configure when deploying a backup node:
+  # node-pg-backup:
+  #   address: "192.168.1.20:8000"
+  #   databases:
+  #     - db_type: postgresql
+  #       versions: [12, 13, 14]
+  #     - db_type: vastbase
+  #       versions: ["3.0.8", "3.0.9", "2.2.15"]
+  #     - db_type: kingbase
+  #       versions: [V8, V9]
+
+  node-oracle:
+    address: "172.16.107.133:8000"
+    databases:
+      - db_type: oracle
+        versions: [11c, 12c, 18c, 21c]
+
+  node-mysql:
+    address: "172.16.105.102:8000"
+    databases:
+      - db_type: mysql
+        versions: ["5.6", "5.7", "8.0"]
+      - db_type: sqlserver
+        versions: ["2017", "2019"]

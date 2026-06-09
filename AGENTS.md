@@ -29,6 +29,64 @@ DB-MCP 是一个基于 FastAPI 的 SQL 验证服务，实现了 Model Context Pr
 - 分层异常体系（精确 HTTP 状态码）
 - 异步非阻塞路由：MCP tools/call 通过 `asyncio.to_thread` 卸载到线程池
 
+### Gateway + Node 分布式架构
+
+DB-MCP 支持两种角色部署以突破单机资源瓶颈：
+
+```
+                     ┌─────────────────────┐
+                     │      Gateway         │  轻量路由层 :8000
+                     │                      │  routing.yaml → RouteTable
+                     │  按 (db_type,ver)    │  → ProxyClient httpx 转发
+                     │  路由到对应 Node      │  不管理容器、不执行SQL
+                     └──────────┬───────────┘
+            ┌───────────────────┼───────────────────┐
+            ▼                   ▼                   ▼
+   ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+   │  Node "pg"     │  │ Node "oracle"  │  │  Node "mysql"  │
+   │  PG/Vastbase/  │  │  Oracle 11c-   │  │  MySQL 5.6-    │
+   │  Kingbase       │  │  21c           │  │  8.0 + MSSQL   │
+   └────────────────┘  └────────────────┘  └────────────────┘
+```
+
+- **Node**：就是当前的单机部署，代码不动，只部署自己负责的数据库类型
+- **Gateway**：新增无状态代理层，读取 `config/routing.yaml`，按 `(db_type, version)` 路由到对应 Node，支持透传、广播聚合、SSE 流式转发
+- **路由是静态的**：不需要 K8s、共识算法 — 只是知道哪个版本在哪台机器上，把请求转过去
+- **副本 + 自动 failover**：同一个 `(db_type, version)` 可配置在多个 Node，Gateway 按声明顺序尝试（primary → backup → ...），主节点不可达时自动切换到备份节点，首次成功即返回
+
+**启动方式**：
+
+```bash
+# Node（默认角色，行为不变）
+python -m src.main --role node --port 8000
+
+# Gateway
+python -m src.main --role gateway --port 8001
+
+# 环境变量
+MCP_ROLE=gateway python -m src.main
+```
+
+**Gateway 端点行为**：
+
+| 端点 | Gateway 行为 |
+|------|-------------|
+| `POST /api/execute_sql` | 解析 body 中 `db_type`+`version` → RouteTable.lookup → 透传到目标 Node |
+| `POST /api/dify/execute_sql` | 同上 |
+| `GET /api/health` | scatter 广播到所有 Node → 聚合 `{"healthy": bool, "nodes": {...}}` |
+| `GET /api/databases` | scatter 广播 → 合并去重返回 |
+| `GET /api/databases/{db_type}/versions` | 查找拥有该 db_type 的 Node → 透传 |
+| `POST /mcp` | `tools/list` → scatter 合并；`tools/call` → 解析 args 中 db_type+version → 透传；`initialize` → 返回 Gateway 自身信息 |
+| `GET /sse` | 根据 query params 的 db_type+version 路由 → SSE 流透传 |
+| `POST /messages` | 按 session 映射转发（fallback 到逐个 Node 尝试） |
+
+**关键设计决策**：
+
+- Node 端零改动：Gateway 是纯粹的透明代理层
+- Gateway 无状态：可以横向扩展（多 Gateway 实例前加 LB）
+- 错误隔离：一个 Node 不可达不影响其他 Node 的聚合响应
+- 路由表是静态 YAML：简化部署，无需服务发现
+
 ---
 
 ## 技术栈
@@ -52,45 +110,54 @@ DB-MCP 是一个基于 FastAPI 的 SQL 验证服务，实现了 Model Context Pr
 ```
 db-mcp/
 ├── config/
-│   ├── databases.yaml              # YAML 配置（Pydantic 校验）
+│   ├── databases.yaml              # 数据库版本配置（Pydantic 校验）
+│   ├── routing.yaml                # Gateway 路由配置
 │   └── dockerfile_templates/       # Dockerfile 模板目录
 │       └── vastbase/
 ├── src/
 │   ├── __init__.py                 # 公开接口导出
-│   ├── main.py                     # 入口：uvicorn 启动，支持 --daemon/--stop/--restart
-│   ├── api.py                      # FastAPI 应用创建 + lifespan（预热 + 优雅关闭）
-│   ├── config_manager.py           # 配置管理（类级单例 + 线程锁 + Pydantic 模型校验）
-│   ├── container_pool.py           # 容器池（线程安全单例 + 连接池 + 信号量并发控制 + 健康监控）
-│   ├── executor.py                 # 执行引擎（SQL 拆分、DDL/DML 路由、异常分类处理、ContainerPool 租约）
-│   ├── exceptions.py               # 异常体系（含 http_status）
-│   ├── dependencies.py             # 惰性单例工厂（get_mcp_handler / get_client_registry）
-│   ├── client_registry.py          # 客户端注册表（API Key + OAuth，threading.Lock）
-│   ├── nexus_client.py             # Nexus 仓库客户端（搜索 + 下载）
-│   ├── package_manager.py          # 包管理器（从 Nexus 下载/解压/缓存二进制）
+│   ├── main.py                     # 入口：uvicorn 启动，--role node|gateway
+│   ├── api.py                      # Node FastAPI 应用创建 + lifespan
+│   ├── config_manager.py           # 配置管理（databases.yaml + routing.yaml）
+│   ├── container_pool.py           # 容器池（线程安全单例）
+│   ├── executor.py                 # 执行引擎
+│   ├── exceptions.py               # 异常体系
+│   ├── dependencies.py             # 惰性单例工厂
+│   ├── client_registry.py          # 客户端注册表
+│   ├── nexus_client.py             # Nexus 仓库客户端
+│   ├── package_manager.py          # 包管理器（Nexus 下载/解压/缓存）
+│   ├── gateway/
+│   │   ├── __init__.py             # Gateway 模块入口
+│   │   ├── router.py               # RouteTable — (db_type,version) → Node 地址
+│   │   ├── proxy.py                # ProxyClient — httpx 异步转发/聚合/流式
+│   │   ├── routes.py               # Gateway FastAPI 路由（透传+聚合+MCP/SSE）
+│   │   └── app.py                  # create_gateway_app() — Gateway 应用组装
 │   ├── adapters/
-│   │   ├── __init__.py             # ADAPTER_REGISTRY 导出
-│   │   ├── base.py                 # DBAdapter 抽象基类 + register_adapter 装饰器
-│   │   ├── vastbase.py             # Vastbase (psycopg2)
-│   │   ├── kingbase.py             # 金仓 (psycopg2)
-│   │   ├── postgresql.py           # PostgreSQL (psycopg2)
-│   │   ├── mysql.py                # MySQL (pymysql)
-│   │   ├── oracle.py               # Oracle (oracledb)
-│   │   └── mssql.py                # SQL Server (pymssql)
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── vastbase.py
+│   │   ├── kingbase.py
+│   │   ├── postgresql.py
+│   │   ├── mysql.py
+│   │   ├── oracle.py
+│   │   └── mssql.py
 │   ├── mcp/
 │   │   ├── __init__.py
-│   │   └── dify_mcp.py             # MCP Handler：工具定义 + 调用分发
+│   │   └── dify_mcp.py
 │   └── routes/
-│       ├── __init__.py             # mcp_router, oauth_router, client_router, execute_router
-│       ├── mcp_routes.py           # MCP JSON-RPC (/、/mcp、/sse、/messages、/mcp/tools 等)
-│       ├── oauth_routes.py         # OAuth DCR / authorize / token
-│       ├── client_routes.py        # 客户端 CRUD + /mcp/call + OAuth 回调
-│       └── execute_routes.py      # /api/execute_sql、/api/databases、/api/health
+│       ├── __init__.py
+│       ├── mcp_routes.py
+│       ├── oauth_routes.py
+│       ├── client_routes.py
+│       └── execute_routes.py
 ├── tests/
 │   ├── test_adapters.py
 │   ├── test_api.py
 │   ├── test_config_manager.py
 │   ├── test_executor.py
-│   └── test_container_pool.py
+│   ├── test_container_pool.py
+│   ├── test_gateway_router.py      # RouteTable 单测
+│   └── test_gateway_proxy.py       # ProxyClient 单测
 ├── requirements.txt
 └── AGENTS.md
 ```
@@ -418,6 +485,43 @@ databases:
 
 `adapter` 字段值必须与 `ADAPTER_REGISTRY` 注册名一致。
 
+### Gateway 路由配置 (`config/routing.yaml`)
+
+Gateway 角色读取此文件（不加载 `databases.yaml`），静态映射 `(db_type, version)` 到 Node 地址：
+
+```yaml
+gateway:
+  host: "0.0.0.0"
+  port: 8000
+  request_timeout: 3600
+  retry_on_node_error: true
+
+nodes:
+  node-pg:
+    address: "192.168.1.10:8000"
+    databases:
+      - db_type: postgresql
+        versions: [12, 13, 14]
+      - db_type: vastbase
+        versions: ["3.0.8", "3.0.9"]
+      - db_type: kingbase
+        versions: [V8, V9]
+
+  node-others:
+    address: "192.168.1.11:8000"
+    databases:
+      - db_type: oracle
+        versions: [11c, 12c, 18c, 21c]
+      - db_type: mysql
+        versions: ["5.6", "5.7", "8.0"]
+      - db_type: sqlserver
+        versions: ["2017", "2019"]
+```
+
+每个 Node 的 `databases.yaml` 只保留自己负责的数据库类型（裁剪部署）。Gateway 启动时 Load → RouteTable 构建扁平 `(db_type, version) → [Route, ...]` 映射，匹配区分大小写（自动剥离 v/V 前缀）。同一 `(db_type, version)` 允许多个 Node 声明，形成副本列表 — 第一个为 primary，后续为 failover 目标。
+
+### 数据库版本配置 (`config/databases.yaml`)
+
 当前配置：
 
 | 数据库 | 版本 | 端口 | DDL 事务 |
@@ -442,6 +546,11 @@ databases:
 | `MCP_HEALTH_CHECK_INTERVAL` | `30` | 健康检查间隔（秒） |
 | `MCP_RESOURCE_CPU_<TYPE>` | 见下表 | 覆盖数据库容器的 CPU 限制（核数） |
 | `MCP_RESOURCE_MEM_<TYPE>` | 见下表 | 覆盖数据库容器的内存限制（如 `512m`、`2g`） |
+| `MCP_ROLE` | `node` | 进程角色：`node`（数据库执行节点）或 `gateway`（路由代理） |
+| `MCP_ROUTING_CONFIG` | `config/routing.yaml` | Gateway 路由配置文件路径 |
+| `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway 监听地址 |
+| `MCP_GATEWAY_PORT` | `8000` | Gateway 监听端口 |
+| `MCP_GATEWAY_TIMEOUT` | `3600` | Gateway 转发请求超时（秒） |
 
 ### 容器资源限制（官方最低要求）
 

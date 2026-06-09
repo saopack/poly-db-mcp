@@ -12,7 +12,7 @@ from ..dependencies import get_mcp_handler
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-MCP_SERVER_INFO = {"name": "db-mcp", "version": "1.0.0"}
+MCP_SERVER_INFO = {"name": "db-mcp", "version": "0.0.2"}
 MCP_CAPABILITIES = {"tools": {}}
 _QUERY_TIMEOUT = int(os.environ.get("MCP_QUERY_TIMEOUT", "3600"))
 
@@ -88,7 +88,7 @@ async def mcp_root():
     base_url = _get_server_base_url()
     return {
         "name": "MCP Database Execution Tool",
-        "version": "1.0.0",
+        "version": "0.0.2",
         "description": "Database SQL execution service for Dify MCP",
         "oauth_metadata": {
             "issuer": base_url,
@@ -123,6 +123,7 @@ async def mcp_jsonrpc_root(request: Request):
 
 
 @router.post("/mcp", summary="MCP JSON-RPC 入口 (/mcp)")
+@router.post("/mcp/", summary="MCP JSON-RPC 入口 (/mcp/)", include_in_schema=False)
 async def mcp_jsonrpc(request: Request):
     try:
         body = await request.json()

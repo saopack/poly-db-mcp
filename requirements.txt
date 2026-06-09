@@ -16,3 +16,5 @@ pymysql==1.1.0
 pymssql==2.2.11
 # 数据库连接池（并发请求复用连接）
 DBUtils==3.1.0
+# Gateway 代理客户端（HTTP 异步转发 / 聚合 / 流式透传）
+httpx==0.24.1

@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MCP Database Execution Tool",
-    version="1.0.0",
+    version="0.0.2",
     lifespan=lifespan,
 )
 

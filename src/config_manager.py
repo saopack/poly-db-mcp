@@ -190,6 +190,20 @@ class ConfigManager:
         return list(db_config['versions'].keys())
 
     @classmethod
+    def load_routing_config(cls, config_path: str = "config/routing.yaml") -> dict:
+        """Load the Gateway routing configuration from *config_path*.
+
+        Returns the raw parsed dict so the caller (e.g. RouteTable) can
+        validate and interpret the structure.
+        """
+        abs_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), config_path)
+        with open(abs_path, 'r', encoding='utf-8') as f:
+            raw = yaml.safe_load(f)
+        if not raw:
+            return {"nodes": {}}
+        return raw
+
+    @classmethod
     def get_nexus_config(cls, db_type: str) -> Optional[Dict[str, str]]:
         """Return nexus credentials for a db_type, or None."""
         if 'databases' not in cls._config:

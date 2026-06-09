@@ -7,6 +7,9 @@ with a per-container semaphore limiting concurrent executions.
 """
 
 import os
+import re
+import json
+import hashlib
 import base64
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -400,21 +403,59 @@ class ContainerPool:
 
         return ContainerLease(self, entry, conn)
 
+    def _hash_config(self, ephemeral_kwargs: dict) -> str:
+        """Generate a deterministic suffix from custom config content.
+
+        Same config → same hash → same container name → reuse."""
+        raw = json.dumps(ephemeral_kwargs, sort_keys=True, ensure_ascii=False)
+        return hashlib.md5(raw.encode()).hexdigest()[:8]
+
     def lease_ephemeral(self, db_type: str, version: str, config: dict,
                         compat_mode: str = "",
                         ephemeral_kwargs: dict = None) -> ContainerLease:
         """Acquire a container with custom config mounts (postgresql.conf etc.).
 
-        The container is registered in the pool for reuse and will be cleaned
-        up at midnight if unused that day.
+        The container key is derived from the config content, so the same
+        custom configuration always reuses the same container across requests.
+        Containers are cleaned up at midnight if unused that day.
         """
         if self._shutting_down.is_set():
             raise ContainerPoolCapacityError("Server is shutting down")
 
-        suffix = os.urandom(4).hex()
+        suffix = self._hash_config(ephemeral_kwargs or {})
         key = _make_container_key(db_type, version, compat_mode)
         container_key = f"{key}-{suffix}"
         container_name = f"db-mcp-{container_key}"
+
+        # Reuse existing healthy container with the same config
+        with self._pool_lock:
+            existing = self._entries.get(container_key)
+        if existing is not None:
+            if existing.destroying:
+                raise ContainerPoolCapacityError(
+                    f"Container for {db_type} {version} is being destroyed, please retry")
+            if existing.state == ContainerState.HEALTHY:
+                logger.info(
+                    "ContainerPool: reusing container %s for %s/%s (config hash=%s)",
+                    container_name, db_type, version, suffix,
+                )
+                existing.semaphore.acquire(timeout=self._lease_timeout)
+                try:
+                    conn = existing.connection_pool.connection()
+                except Exception:
+                    existing.semaphore.release()
+                    raise
+                with self._pool_lock:
+                    existing.active_leases += 1
+                    existing.last_used = time.time()
+                return ContainerLease(self, existing, conn)
+            if existing.state in (ContainerState.UNHEALTHY, ContainerState.STOPPED):
+                logger.info(
+                    "ContainerPool: replacing unhealthy container %s", container_name,
+                )
+                self._remove_container(container_name, force=True)
+                with self._pool_lock:
+                    self._entries.pop(container_key, None)
 
         entry = ContainerEntry(
             container_name=container_name,
@@ -537,28 +578,41 @@ class ContainerPool:
                     container_name,
                     guc_params.strip(),
                 )
+                # Detect dolphin_server_port and map it out
+                for line in guc_params.split('\n'):
+                    m = re.match(r'^\s*dolphin_server_port\s*=\s*(\d+)', line)
+                    if m:
+                        dolphin_port = m.group(1)
+                        run_kwargs['ports'][f'{dolphin_port}/tcp'] = None
+                        logger.info(
+                            "ContainerPool: %s dolphin_server_port=%s → mapping port %s/tcp",
+                            container_name, dolphin_port, dolphin_port,
+                        )
+                        break
 
             temp_dirs = []
             volumes = {}
+            # Collect all init files (conf + extras) into a single tmpdir
+            # and mount the directory — Docker requires directory mounts
+            # for container paths that don't already exist as files.
+            init_tmpdir = None
+
             for conf_key, conf_filename in [
                 ('postgresql_conf', 'postgresql.conf'),
                 ('pg_hba_conf', 'pg_hba.conf'),
             ]:
                 content = ephemeral_kwargs.get(conf_key)
                 if content:
-                    tmpdir = tempfile.mkdtemp(prefix=f"db-mcp-conf-{container_name}-")
-                    temp_dirs.append(tmpdir)
-                    conf_path = os.path.join(tmpdir, conf_filename)
+                    if init_tmpdir is None:
+                        init_tmpdir = tempfile.mkdtemp(prefix=f"db-mcp-init-{container_name}-")
+                        temp_dirs.append(init_tmpdir)
+                    conf_path = os.path.join(init_tmpdir, conf_filename)
                     try:
                         decoded = base64.b64decode(content.encode()).decode()
                     except Exception:
                         decoded = content
                     with open(conf_path, 'w', encoding='utf-8') as f:
                         f.write(decoded)
-                    volumes[conf_path] = {
-                        'bind': f'/docker-entrypoint-initdb.d/{conf_filename}',
-                        'mode': 'ro',
-                    }
                     _lines = decoded.strip().split('\n')
                     _preview = '\n'.join(_lines[:20])
                     _more = f" ... (+{len(_lines) - 20} more lines)" if len(_lines) > 20 else ""
@@ -569,29 +623,32 @@ class ContainerPool:
                         _preview, _more,
                     )
 
-            # Mount extra files to /docker-entrypoint-initdb.d/
             extra_files = ephemeral_kwargs.get('extra_files') if ephemeral_kwargs else None
             if extra_files:
                 for ef in extra_files:
                     file_name = ef.name if hasattr(ef, 'name') else ef['name']
                     content = ef.content if hasattr(ef, 'content') else ef['content']
-                    tmpdir = tempfile.mkdtemp(prefix=f"db-mcp-extra-{container_name}-")
-                    temp_dirs.append(tmpdir)
-                    local_path = os.path.join(tmpdir, file_name)
+                    if init_tmpdir is None:
+                        init_tmpdir = tempfile.mkdtemp(prefix=f"db-mcp-init-{container_name}-")
+                        temp_dirs.append(init_tmpdir)
+                    local_path = os.path.join(init_tmpdir, file_name)
                     try:
                         decoded = base64.b64decode(content.encode()).decode()
                     except Exception:
                         decoded = content
                     with open(local_path, 'w', encoding='utf-8') as f:
                         f.write(decoded)
-                    volumes[local_path] = {
-                        'bind': f'/docker-entrypoint-initdb.d/{file_name}',
-                        'mode': 'ro',
-                    }
                     logger.info(
                         "ContainerPool: %s extra file %s (%d bytes)",
                         container_name, file_name, len(decoded),
                     )
+
+            # Mount entire init directory instead of individual files
+            if init_tmpdir:
+                volumes[init_tmpdir] = {
+                    'bind': '/docker-entrypoint-initdb.d',
+                    'mode': 'ro',
+                }
 
             if volumes:
                 run_kwargs['volumes'] = volumes

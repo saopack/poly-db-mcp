@@ -66,8 +66,8 @@ def _is_plsql_block(query: str) -> bool:
         return True
     if upper.startswith("CREATE") and any(
         kw in upper for kw in (
-            "FUNCTION ", "PROCEDURE ", "PACKAGE ", "TYPE ", "TRIGGER ",
-            "OR REPLACE FUNCTION", "OR REPLACE PROCEDURE",
+            "FUNCTION ", "PROCEDURE ", "PROC ", "PACKAGE ", "TYPE ", "TRIGGER ",
+            "OR REPLACE FUNCTION", "OR REPLACE PROCEDURE", "OR REPLACE PROC",
             "OR REPLACE PACKAGE", "OR REPLACE TYPE", "OR REPLACE TRIGGER",
         )
     ):
@@ -278,11 +278,13 @@ def _split_sql_statements(query: str) -> List[str]:
 
         if ch == '/':
             # / followed by newline or end-of-input: statement delimiter (Oracle)
+            # Also used by SQL Server users as batch separator (analogous to GO).
             if i + 1 < n and query[i + 1] == '\r':
                 stmt = ''.join(current).strip()
                 if stmt:
                     statements.append(stmt)
                 current = []
+                in_plsql = False
                 i += 2  # skip \r
                 if i < n and query[i] == '\n':
                     i += 1  # skip \n
@@ -292,6 +294,7 @@ def _split_sql_statements(query: str) -> List[str]:
                 if stmt:
                     statements.append(stmt)
                 current = []
+                in_plsql = False
                 i += 2
                 continue
             if i + 1 >= n:
@@ -299,6 +302,7 @@ def _split_sql_statements(query: str) -> List[str]:
                 if stmt:
                     statements.append(stmt)
                 current = []
+                in_plsql = False
                 i += 1
                 continue
 
